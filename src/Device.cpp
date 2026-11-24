@@ -152,7 +152,7 @@ void Device::said(const std::string &path, const ValueList &args)
 {
     std::string text = path;
     for (const Value &v : args) text += ' ' + (v.is<Blob>() ? std::string("<blob>") : v.text());
-    m_tree.fire("/signals/last_action", {Value(text)});
+    m_tree.fire("/generator/signals/last_action", {Value(text)});
 }
 
 void Device::relate(const std::string &parent, const std::vector<std::string> &children)
@@ -199,24 +199,10 @@ void Device::buildGenerator()
 
     group("/generator/transport", "Transport", "A parameter and actions side by side: a switch, and what moves it");
     bound("/generator/transport/play", "Play", Parameter::Type::Bool, s.play, [](Parameter &p) { p.transient(); });
-    action("/generator/transport/start", "N", "Start", "Play", [this](const ValueList &) {
-        s.play = true;
-        m_tree.changed("/generator/transport/play");
-        return true;
-    });
-    action("/generator/transport/stop", "N", "Stop", "Stop", [this](const ValueList &) {
-        s.play = false;
-        m_tree.changed("/generator/transport/play");
-        return true;
-    });
     action("/generator/transport/rewind", "N", "Rewind", "Back to the start of the first loop", [this](const ValueList &) {
         s.pos = 0;
         s.loopCount = 0;
         m_tree.changed("/generator/loops/loop_count");
-        return true;
-    });
-    action("/generator/transport/randomize", "N", "Randomize", "A random frequency, amplitude and shift", [this](const ValueList &) {
-        randomize();
         return true;
     });
     action("/generator/transport/seek", "f", "Seek", "Go to a place in the loop (0 to 1)", [this](const ValueList &v) {
@@ -246,15 +232,24 @@ void Device::buildGenerator()
           [](Parameter &p) { p.range(0.05, 20).step(0.05).unit("frequency.hertz").animatable(); });
     bound("/generator/wave/amplitude", "Amplitude", Parameter::Type::Float, s.amplitude, [](Parameter &p) { p.range(0, 1).animatable(); });
     bound("/generator/wave/offset", "Offset", Parameter::Type::Float, s.offset, [](Parameter &p) { p.range(-1, 1).animatable(); });
-    bound("/generator/wave/shift", "Phase shift", Parameter::Type::Float, s.shift, [](Parameter &p) { p.range(0, 1).animatable(); });
-    bound("/generator/wave/hue", "Hue", Parameter::Type::Float, s.hue,
-          [](Parameter &p) { p.range(0, 360).ramp(Parameter::Ramp::Angle).unit("angle.degree").animatable(); });
+    bound("/generator/wave/shift", "Phase shift", Parameter::Type::Float, s.shift, [](Parameter &p) { p.range(0, 1).animatable(); }).description =
+        "Moves the waveform along its loop (1 is a whole loop): the shape starts later, the loop does not";
     bound("/generator/wave/label", "Label", Parameter::Type::Text, s.label, [](Parameter &) {});
 
     group("/generator/loops", "Loops", "Whole numbers: any within limits, one among a few, and a state that is only read");
     bound("/generator/loops/loops", "Loops (0: endless)", Parameter::Type::Int, s.loops, [](Parameter &p) { p.range(0, 100).step(1); });
-    bound("/generator/loops/steps", "Steps", Parameter::Type::Int, s.steps, [](Parameter &p) { p.values({1, 2, 4, 8, 16}); });
+    bound("/generator/loops/steps", "Steps", Parameter::Type::Int, s.steps, [](Parameter &p) { p.values({1, 2, 4, 8, 16}); }).description =
+        "Cuts the waveform into a stair of 8 x steps levels (1: smooth). A whole number that can only be one of a few";
     bound("/generator/loops/loop_count", "Loops done", Parameter::Type::Int, s.loopCount, [](Parameter &p) { p.readOnly().range(0, 100000); });
+
+    group("/generator/signals", "Signals", "Signals only: what the generator emits, nobody writes them. The waveform is a signal that holds others");
+    signal("/generator/signals/last_action", "s", "Last action", "The last action received, with its address and arguments");
+    signal("/generator/signals/wave", "f", "Waveform", "The waveform, 50 times a second", {range(-1, 2)});
+    signal("/generator/signals/wave/cycle", "N", "Cycle", "N: a loop starts (an impulse, no value)");
+    signal("/generator/signals/wave/done", "N", "Done", "N: the loops asked for are done");
+    signal("/generator/signals/wave/above", "T", "Above half", "T: the waveform crossed 0.5");
+    signal("/generator/signals/wave/phase", "f", "Phase", "f: where it is in the loop", {range(0, 1)});
+    signal("/generator/signals/wave/seconds", "d", "Seconds", "d: seconds since it started playing");
 }
 
 // ---- /values: a parameter that holds its components
@@ -365,21 +360,14 @@ void Device::buildActions()
 
 void Device::buildSignals()
 {
-    group("/signals", "Signals", "Nodes that are only signals: the device emits them, nobody writes them and nothing is kept");
-    signal("/signals/last_action", "s", "Last action", "The last action received, with its address and arguments");
-    signal("/signals/wave", "f", "Waveform", "The waveform, 50 times a second. A signal that holds the other signals", {range(-1, 2)});
-    signal("/signals/wave/loop", "i", "Loops", "i: the loops done, at each loop");
-    signal("/signals/wave/cycle", "N", "Cycle", "N: a loop starts (an impulse, no value)");
-    signal("/signals/wave/done", "N", "Done", "N: the loops asked for are done");
-    signal("/signals/wave/above", "T", "Above half", "T: the waveform crossed 0.5");
-    signal("/signals/wave/phase", "f", "Phase", "f: where it is in the loop", {range(0, 1)});
-    signal("/signals/wave/seconds", "d", "Seconds", "d: seconds since it started playing");
-    signal("/signals/wave/xy", "ff", "Waveform and opposite", "ff: two numbers that move together", {range(0, 1), range(0, 1)});
-    signal("/signals/wave/rgb", "fff", "Color", "fff: a colour that follows the waveform", {range(0, 1), range(0, 1), range(0, 1)},
+    group("/signals", "Signals", "Nodes that are only signals, of the kinds the generator does not need: the device emits them, nobody writes them");
+    signal("/signals/xy", "ff", "Waveform and opposite", "ff: two numbers that move together", {range(0, 1), range(0, 1)});
+    signal("/signals/rgb", "fff", "Color", "fff: a colour that follows the waveform", {range(0, 1), range(0, 1), range(0, 1)},
            {"color.rgb.r", "color.rgb.g", "color.rgb.b"});
-    signal("/signals/wave/text", "s", "Text", "s: a text with the loop count");
-    signal("/signals/wave/stamp", "h", "Stamp", "h: milliseconds since 1970 (64 bits)");
-    signal("/signals/wave/digest", "b", "Digest", "b: four bytes that follow the waveform");
+    signal("/signals/text", "s", "Text", "s: a text with the loop count. A signal that holds another");
+    signal("/signals/text/length", "i", "Text length", "i: how long that text is");
+    signal("/signals/stamp", "h", "Stamp", "h: milliseconds since 1970 (64 bits)");
+    signal("/signals/digest", "b", "Digest", "b: four bytes that follow the waveform");
 }
 
 // ---- /access: who can do what
@@ -450,15 +438,6 @@ void Device::buildUi()
 
 // ---- the generator itself
 
-void Device::randomize()
-{
-    std::uniform_real_distribution<double> d(0, 1);
-    s.frequency = 0.1 + d(m_rng) * 4;
-    s.amplitude = 0.3 + d(m_rng) * 0.7;
-    s.shift = d(m_rng);
-    for (const char *p : {"/generator/wave/frequency", "/generator/wave/amplitude", "/generator/wave/shift"}) m_tree.changed(p);
-}
-
 double Device::wave(double phase)
 {
     phase -= std::floor(phase);
@@ -487,31 +466,32 @@ void Device::tick()
         if (s.pos >= 1.0) {
             s.pos -= std::floor(s.pos);
             ++s.loopCount;
-            m_tree.fire("/signals/wave/loop", {Value(s.loopCount)});
-            m_tree.fire("/signals/wave/cycle");
+            m_tree.fire("/generator/signals/wave/cycle");
             m_tree.fire("/structure/mixed/pulse");
-            m_tree.fire("/signals/wave/text", {Value("loop " + std::to_string(s.loopCount))});
+            const std::string text = "loop " + std::to_string(s.loopCount);
+            m_tree.fire("/signals/text", {Value(text)});
+            m_tree.fire("/signals/text/length", {Value(int(text.size()))});
             m_tree.changed("/generator/loops/loop_count");
             if (s.loops > 0 && s.loopCount >= s.loops) {
                 s.play = false;
                 m_tree.changed("/generator/transport/play");
-                m_tree.fire("/signals/wave/done");
+                m_tree.fire("/generator/signals/wave/done");
             }
         }
     }
     s.value = m_flash ? 1.0 : wave(s.pos + s.shift);
-    m_tree.fire("/signals/wave", {Value(s.value)});
-    m_tree.fire("/signals/wave/phase", {Value(s.pos)});
-    m_tree.fire("/signals/wave/seconds", {Value(s.seconds)});
-    m_tree.fire("/signals/wave/xy", {Value(float(std::clamp(s.value, 0.0, 1.0))), Value(float(std::clamp(1 - s.value, 0.0, 1.0)))});
-    m_tree.fire("/signals/wave/rgb", {Value(float(std::clamp(s.value * s.r, 0.0, 1.0))), Value(float(std::clamp(s.value * s.g, 0.0, 1.0))),
+    m_tree.fire("/generator/signals/wave", {Value(s.value)});
+    m_tree.fire("/generator/signals/wave/phase", {Value(s.pos)});
+    m_tree.fire("/generator/signals/wave/seconds", {Value(s.seconds)});
+    m_tree.fire("/signals/xy", {Value(float(std::clamp(s.value, 0.0, 1.0))), Value(float(std::clamp(1 - s.value, 0.0, 1.0)))});
+    m_tree.fire("/signals/rgb", {Value(float(std::clamp(s.value * s.r, 0.0, 1.0))), Value(float(std::clamp(s.value * s.g, 0.0, 1.0))),
                                       Value(float(std::clamp(s.value * s.b, 0.0, 1.0)))});
-    m_tree.fire("/signals/wave/stamp", {Value(std::int64_t(QDateTime::currentMSecsSinceEpoch()))});
+    m_tree.fire("/signals/stamp", {Value(std::int64_t(QDateTime::currentMSecsSinceEpoch()))});
     const std::uint8_t level = std::uint8_t(std::clamp(s.value, 0.0, 1.0) * 255);
-    m_tree.fire("/signals/wave/digest", {Value(Blob{level, std::uint8_t(255 - level), level, std::uint8_t(255 - level)})});
+    m_tree.fire("/signals/digest", {Value(Blob{level, std::uint8_t(255 - level), level, std::uint8_t(255 - level)})});
     const bool above = s.value > 0.5;
     if (above != s.above) {
         s.above = above;
-        m_tree.fire("/signals/wave/above", {Value(above)});
+        m_tree.fire("/generator/signals/wave/above", {Value(above)});
     }
 }

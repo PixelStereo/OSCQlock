@@ -37,15 +37,16 @@ can move the window: `/ui/tab values`, or the actions `/ui/tab/next` and `/ui/ta
 
 | Tab | Under | The case it is for |
 |---|---|---|
-| **Generator** | `/generator/transport` | a parameter (`play`) and actions side by side: `start`, `stop`, `rewind`, `randomize`, `seek` (`f`), `jump` (`i`), `go_to` (`if`), `flash` (`T`) |
-| | `/generator/wave` | parameters only: `type` (a choice), `frequency` (Hz, a step), `amplitude`, `offset`, `shift`, `hue` (degrees, a ramp that takes the short way round), `label` (text) |
-| | `/generator/loops` | whole numbers: `loops` (any within limits), `steps` (one among `1 2 4 8 16`), `loop_count` (only read) |
+| **Generator** | `/generator/transport` | a parameter (`play`) and actions side by side: `rewind`, `seek` (`f`), `jump` (`i`), `go_to` (`if`), `flash` (`T`) |
+| | `/generator/wave` | parameters only: `type` (a choice), `frequency` (Hz, a step), `amplitude`, `offset`, `shift` (moves the waveform along its loop), `label` (text) |
+| | `/generator/loops` | whole numbers: `loops` (any within limits), `steps` (one among `1 2 4 8 16`: the waveform is cut into 8 x steps levels), `loop_count` (only read) |
+| | `/generator/signals` | signals only: `last_action`, and `wave` (`f`) that holds `cycle` and `done` (impulses, `N`), `above` (`T`), `phase` (`f`), `seconds` (`d`) |
 | **Values** | `/values/position` | a value (`ff`) that holds its components `x` and `y`: writing one says it to the other |
 | | `/values/color` | a colour (`fff`) that holds `r` `g` `b`, a switch `enable` and an action `set`; its widget is the colour picker |
 | | `/values/rgba`, `origin` | a colour with alpha (`ffff`) and three plain numbers (`fff`), neither with components |
 | **Types** | `/types/…` | one parameter of each kind: `switch` (`T`), `int`, `int_among`, `choice`, `float`, `wide` (a wide range), `text`, `double` (`d`), `int64` (`h`), `blob` (`b`) |
 | **Actions** | `/actions/…` | nodes that are only actions: with no value (`none`), with one of each type, with several (`point`, `color`, `several`, `mixed`); `counter` is a parameter that holds the actions `increment`, `decrement`, `reset` |
-| **Signals** | `/signals/wave` | a signal that holds the others, one of each type: `loop` (`i`), `cycle` and `done` (impulses, `N`), `above` (`T`), `phase`, `seconds` (`d`), `xy`, `rgb`, `text`, `stamp` (`h`), `digest` (`b`); `/signals/last_action` says the last action received |
+| **Signals** | `/signals/…` | the kinds the generator does not say: `xy` (`ff`), `rgb` (`fff`), `text` (`s`) that holds `length` (`i`), `stamp` (`h`), `digest` (`b`) |
 | **Access** | `/access/…` | `read_only` (a write is refused), `write_only` (no value to read), `locked` (the device refuses every write), `transient` (never saved), `critical`, `tagged` (tags and an attribute of its own), `trigger` (a parameter that is an action) |
 | **Structure** | `/structure/…` | nodes that are only nodes: `empty`, four levels deep (`a/b/c/d`), side by side (`b/sibling`), and `mixed`: a parameter, an action and a signal in one node |
 | **Interface** | `/ui/tab` | the window's own tab, and the actions `next` and `previous` that it holds |

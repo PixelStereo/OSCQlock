@@ -3,11 +3,11 @@
 // pxs-core tree has, so that a controller, an explorer or a mapper can be tried on all of them. The namespace is the contract, and it is
 // made so that each top-level node (a tab of the window, see Panel) shows one case:
 //
-//   /generator   a node that holds nodes that hold parameters, actions, or both: what a device is
+//   /generator   a node that holds nodes that hold parameters, actions, signals, or a mix: what a device is
 //   /values      a parameter that holds its components, with an action and a switch under it; a colour; a point; plain groups of numbers
 //   /types       one parameter of each kind: switch, whole number (any, one among a few), choice, float, double, 64 bits, text, blob
 //   /actions     nodes that are only actions: with no value, with one of each kind, with several; and a parameter that holds actions
-//   /signals     nodes that are only signals, of each kind; one that holds the others
+//   /signals     nodes that are only signals, of the kinds the generator does not say; one that holds another
 //   /access      who can do what: read only, write only, locked, never saved, critical, tagged, a trigger
 //   /structure   nodes that are only nodes: empty, deep, side by side, and one that holds a parameter, an action and a signal
 //   /ui          the window's own tab, driven by OSC like any parameter, with the actions that move it
@@ -37,7 +37,7 @@ private:
     struct State {
         bool play = false;
         std::string type = "sine", label = "OSCQlock";
-        double frequency = 1.0, amplitude = 1.0, offset = 0.0, shift = 0.0, hue = 0.0;
+        double frequency = 1.0, amplitude = 1.0, offset = 0.0, shift = 0.0;
         int loops = 0, steps = 4, loopCount = 0;
         double pos = 0, seconds = 0, value = 0; // where it is in the loop, since when it plays, what it says
         bool above = false;
@@ -69,9 +69,8 @@ private:
     void action(const char *path, const char *type, const char *label, const char *description, std::function<bool(const pxs::core::ValueList &)> handler);
     // A parameter and the nodes under it that are views of it: writing one tells the others
     void relate(const std::string &parent, const std::vector<std::string> &children);
-    void said(const std::string &path, const pxs::core::ValueList &args); // the last action, on /signals/last_action
+    void said(const std::string &path, const pxs::core::ValueList &args); // the last action, on /generator/signals/last_action
 
-    void randomize();
     double wave(double phase);
     void tick();
 
