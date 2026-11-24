@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Configures and builds OSCQlock into build/, then (with --run) starts it.
 #
-#   scripts/build.sh                  # Release build
-#   scripts/build.sh --debug          # Debug build
-#   scripts/build.sh --run [args]     # build, then run OSCQlock with the arguments that follow
+#   ./build.sh                  # Release build
+#   ./build.sh --debug          # Debug build
+#   ./build.sh --run [args]     # build, then run OSCQlock with the arguments that follow
 #
 # Qt 6.4 or later must be found by CMake (CMAKE_PREFIX_PATH, or a Homebrew / distribution Qt).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 
 TYPE=Release
 RUN=0
