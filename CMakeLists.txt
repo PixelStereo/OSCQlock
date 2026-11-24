@@ -23,9 +23,10 @@ if(APPLE)
 elseif(WIN32)
     list(APPEND OSCQLOCK_ICONS packaging/oscqlock.rc)
 endif()
-add_executable(OSCQlock WIN32 MACOSX_BUNDLE main.cpp ${OSCQLOCK_ICONS})
+add_executable(OSCQlock WIN32 MACOSX_BUNDLE src/main.cpp src/Device.cpp src/Device.h src/Panel.cpp src/Panel.h ${OSCQLOCK_ICONS})
+target_include_directories(OSCQlock PRIVATE src)
 target_compile_definitions(OSCQlock PRIVATE OSCQLOCK_VERSION="${OSCQLOCK_VERSION}")
-target_link_libraries(OSCQlock PRIVATE pxs::params pxs::tree pxs::oscquery pxs::theme Qt6::Widgets Qt6::Network)
+target_link_libraries(OSCQlock PRIVATE pxs::params pxs::tree pxs::oscquery pxs::theme pxs::widgets pxs::filterview Qt6::Widgets Qt6::Network)
 set_target_properties(OSCQlock PROPERTIES OUTPUT_NAME "${OSCQLOCK_APP_NAME}"
     MACOSX_BUNDLE_ICON_FILE "oscqlock.icns" MACOSX_BUNDLE_GUI_IDENTIFIER "fr.pixelstereo.oscqlock" MACOSX_BUNDLE_BUNDLE_NAME "OSCQlock"
     # Our own Info.plist: macOS only lets an app use the local network (Bonjour, multicast) when it says why
