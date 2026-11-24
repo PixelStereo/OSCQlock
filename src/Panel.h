@@ -20,14 +20,20 @@ class QTabWidget;
 class Panel : public QWidget
 {
 public:
-    // `tabs`: the names of the top-level nodes, in the order of the tabs. The node "/ui/tab" (a choice of those names, if the tree has one) is the current tab
-    // `order`: the addresses of the nodes in the order they should be shown (what is not in it comes after, by name)
-    Panel(pxs::core::tree::Tree &tree, const std::vector<std::string> &tabs, const std::vector<std::string> &order = {}, QWidget *parent = nullptr);
+    // Controls: a tab for each top-level node that has something to set or to send (the signals are not here). Signals: one page with
+    // only the signals, grouped by the nodes that hold them
+    enum class Mode { Controls, Signals };
+
+    // `sections`: the names of the top-level nodes, in order. In Controls mode the node "/ui/tab" (a choice of those names, if the tree has
+    // one) is the current tab. `order`: the addresses of the nodes in the order they should be shown (what is not in it comes after, by name)
+    Panel(pxs::core::tree::Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order = {},
+          Mode mode = Mode::Controls, QWidget *parent = nullptr);
     ~Panel() override;
 
 private:
     using Show = std::function<void(const pxs::core::ValueList &)>;
 
+    bool relevant(const pxs::core::tree::Node &node) const; // is there something of this panel in it
     void fill(QFormLayout *form, const pxs::core::tree::Node &node);
     void addRow(QFormLayout *form, const pxs::core::tree::Node &node);
     QWidget *editorFor(const pxs::core::tree::Node &node);
@@ -36,7 +42,8 @@ private:
     void send(const pxs::core::tree::Node &node, const pxs::core::ValueList &args);
 
     pxs::core::tree::Tree &m_tree;
-    std::vector<std::string> m_tabs;
+    Mode m_mode;
+    std::vector<std::string> m_tabs; // the tabs that were made, by name
     std::unordered_map<std::string, int> m_order;
     QTabWidget *m_tabWidget = nullptr;
     int m_observer = 0;

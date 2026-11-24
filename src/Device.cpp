@@ -177,7 +177,7 @@ void Device::relate(const std::string &parent, const std::vector<std::string> &c
 
 Device::Device(QObject *parent) : QObject(parent)
 {
-    m_tabs = {"generator", "values", "types", "actions", "signals", "access", "structure", "ui"};
+    m_tabs = {"generator", "values", "types", "actions", "access", "structure", "ui"};
     buildGenerator();
     buildValues();
     buildTypes();
@@ -420,7 +420,7 @@ void Device::buildStructure()
 
 void Device::buildUi()
 {
-    group("/ui", "Interface", "What the window shows: the tab is a parameter like the others, and moves by OSC");
+    group("/ui", "Interface", "What the window shows: the tab and the drawer of the signals are parameters like the others, and move by OSC");
     bound("/ui/tab", "Tab", Parameter::Type::Choice, s.tab, [this](Parameter &p) { p.choices(m_tabs); }).description =
         "The tab of the window (the name of a top-level node). A parameter that holds actions";
     auto move = [this](int by) {
@@ -430,6 +430,8 @@ void Device::buildUi()
         m_tree.changed("/ui/tab");
         return true;
     };
+    bound("/ui/signals", "Signals drawer", Parameter::Type::Bool, s.drawer, [](Parameter &p) { p.transient(); }).description =
+        "The drawer that shows the signals: open or closed";
     action("/ui/tab/next", "N", "Next tab", "The tab after, round", [move](const ValueList &) { return move(1); });
     action("/ui/tab/previous", "N", "Previous tab", "The tab before, round", [move](const ValueList &) { return move(-1); });
 }

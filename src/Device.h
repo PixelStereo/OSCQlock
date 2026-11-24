@@ -7,10 +7,11 @@
 //   /values      a parameter that holds its components, with an action and a switch under it; a colour; a point; plain groups of numbers
 //   /types       one parameter of each kind: switch, whole number (any, one among a few), choice, float, double, 64 bits, text, blob
 //   /actions     nodes that are only actions: with no value, with one of each kind, with several; and a parameter that holds actions
-//   /signals     nodes that are only signals, of the kinds the generator does not say; one that holds another
+//   /signals     nodes that are only signals, of the kinds the generator does not say; one that holds another. Like the signals under
+//                /generator and /structure it is shown in the drawer of the window, not in a tab
 //   /access      who can do what: read only, write only, locked, never saved, critical, tagged, a trigger
 //   /structure   nodes that are only nodes: empty, deep, side by side, and one that holds a parameter, an action and a signal
-//   /ui          the window's own tab, driven by OSC like any parameter, with the actions that move it
+//   /ui          the window's own state, driven by OSC like any parameter: its tab (and the actions that move it), the drawer of the signals
 #include <pxs/core/tree/tree.h>
 
 #include <QElapsedTimer>
@@ -27,8 +28,15 @@ public:
     explicit Device(QObject *parent = nullptr);
 
     pxs::core::tree::Tree &tree() { return m_tree; }
-    // The top-level nodes in the order of the tabs
+    // The top-level nodes that are tabs, in order (the signals are in a drawer of their own, not in a tab)
     const std::vector<std::string> &tabs() const { return m_tabs; }
+    // Every top-level node, the tabs and then the signals
+    std::vector<std::string> topLevel() const
+    {
+        std::vector<std::string> all = m_tabs;
+        all.push_back("signals");
+        return all;
+    }
     // Every node's address in the order it was declared: how the window orders what a node holds (the tree itself is sorted by name)
     const std::vector<std::string> &declared() const { return m_declared; }
 
@@ -44,6 +52,7 @@ private:
         float x = 0.5f, y = 0.5f, r = 1.0f, g = 0.5f, b = 0.0f;
         bool tint = true;
         std::string tab = "generator";
+        bool drawer = false;
         int uptime = 0, counter = 0;
     };
 

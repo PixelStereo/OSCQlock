@@ -28,27 +28,28 @@ parameter tree and the dark look of the Pixel Stereo applications.
 
 ## The namespace, tab by tab
 
-The window is made from the tree: **a tab for each top-level node**, a section for each node that holds others, and **one widget for each leaf**,
-the one of its kind (the fields, the colour picker and the meters of pxs-qt). A widget writes the way an OSC message does, and follows the tree
+The window is made from the tree, at a fixed size: **a tab for each top-level node**, a section for each node that holds others, and **one widget for each leaf**,
+the one of its kind (the fields and the colour picker of pxs-qt). **The signals are not in the tabs: they are in a drawer** on the right of the window (the handle ◂ opens it),
+with their meters, lamps and readouts, grouped by the node that holds them. A widget writes the way an OSC message does, and follows the tree
 when anything else writes: from OSC, from another widget, from the device. Hover a row for its address, kind and tags.
 
-The tab is a parameter like the others, `/ui/tab` (one of `generator values types actions signals access structure ui`), so a controller
-can move the window: `/ui/tab values`, or the actions `/ui/tab/next` and `/ui/tab/previous`.
+The tab and the drawer are parameters like the others, so a controller can move the window: `/ui/tab` (one of `generator values types actions access structure ui`),
+the actions `/ui/tab/next` and `/ui/tab/previous`, and `/ui/signals` (`T`: the drawer open or closed).
 
 | Tab | Under | The case it is for |
 |---|---|---|
 | **Generator** | `/generator/transport` | parameters (`play`, `flash`) and actions side by side: `rewind`, `seek` (`f`), `jump` (`i`), `go_to` (`if`) |
 | | `/generator/wave` | parameters only: `type` (a choice), `frequency` (Hz, a step), `amplitude`, `offset`, `shift` (moves the waveform along its loop), `label` (text) |
 | | `/generator/loops` | whole numbers: `loops` (any within limits), `steps` (one among `1 2 4 8 16`: the waveform is cut into 8 x steps levels), `loop_count` (only read) |
-| | `/generator/signals` | signals only: `last_action`, and `wave` (`f`) that holds `cycle` and `done` (impulses, `N`), `above` (`T`), `phase` (`f`), `seconds` (`d`) |
+| | `/generator/signals` | signals only (in the drawer): `last_action`, and `wave` (`f`) that holds `cycle` and `done` (impulses, `N`), `above` (`T`), `phase` (`f`), `seconds` (`d`) |
 | **Values** | `/values/position` | a value (`ff`) that holds its components `x` and `y`: writing one says it to the other |
 | | `/values/color` | a colour (`fff`) that holds `r` `g` `b`, a switch `enable` and an action `set`; its widget is the colour picker |
 | | `/values/rgba`, `origin` | a colour with alpha (`ffff`) and three plain numbers (`fff`), neither with components |
 | **Types** | `/types/…` | one parameter of each kind: `switch` (`T`), `int`, `int_among`, `choice`, `float`, `wide` (a wide range), `text`, `double` (`d`), `int64` (`h`), `blob` (`b`) |
 | **Actions** | `/actions/…` | nodes that are only actions: with no value (`none`), with one of each type, with several (`point`, `color`, `several`, `mixed`); `counter` is a parameter that holds the actions `increment`, `decrement`, `reset` |
-| **Signals** | `/signals/…` | the kinds the generator does not say: `xy` (`ff`), `rgb` (`fff`), `text` (`s`) that holds `length` (`i`), `stamp` (`h`), `digest` (`b`) |
+| *(drawer)* | `/signals/…` | the kinds the generator does not say: `xy` (`ff`), `rgb` (`fff`), `text` (`s`) that holds `length` (`i`), `stamp` (`h`), `digest` (`b`); with `/generator/signals` and `/structure/mixed/pulse` |
 | **Access** | `/access/…` | `read_only` (a write is refused), `write_only` (no value to read), `locked` (the device refuses every write), `transient` (never saved), `critical`, `tagged` (tags and an attribute of its own), `trigger` (a parameter that is an action) |
 | **Structure** | `/structure/…` | nodes that are only nodes: `empty`, four levels deep (`a/b/c/d`), side by side (`b/sibling`), and `mixed`: a parameter, an action and a signal in one node |
-| **Interface** | `/ui/tab` | the window's own tab, and the actions `next` and `previous` that it holds |
+| **Interface** | `/ui/tab`, `/ui/signals` | the window's own tab (with the actions `next` and `previous` that it holds), and the drawer of the signals |
 
 Every numeric parameter says its range and default (a reset is writing `DEFAULT_VALUE`); the tree is checked at start (`Tree::check()`), and `--check` fails when it lacks something.

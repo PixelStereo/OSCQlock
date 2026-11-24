@@ -229,42 +229,57 @@ QWidget *captionFor(const Node &node)
 
 } // namespace
 
-Panel::Panel(Tree &tree, const std::vector<std::string> &tabs, const std::vector<std::string> &order, QWidget *parent)
-    : QWidget(parent), m_tree(tree), m_tabs(tabs)
+Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order, Mode mode, QWidget *parent)
+    : QWidget(parent), m_tree(tree), m_mode(mode)
 {
     for (std::size_t i = 0; i < order.size(); ++i) m_order[order[i]] = int(i);
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
-    m_tabWidget = new QTabWidget;
-    outer->addWidget(m_tabWidget);
-    for (const std::string &name : m_tabs) {
-        const Node *node = tree.find("/" + name);
-        if (!node) continue;
+    const auto pageOf = [](QFormLayout *&form) {
         auto *page = new QWidget;
-        auto *form = new QFormLayout(page);
+        form = new QFormLayout(page);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         form->setLabelAlignment(Qt::AlignLeft | Qt::AlignTop);
-        fill(form, *node);
         auto *scroll = new QScrollArea;
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setWidget(page);
-        m_tabWidget->addTab(scroll, fromStd(node->displayLabel()));
-    }
+        return scroll;
+    };
 
-    // The tab is the node "/ui/tab": the user's click writes it, and a write to it (OSC, another widget) moves the tab
-    if (const Node *tab = tree.find("/ui/tab")) {
-        QObject::connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
-            if (index >= 0 && index < int(m_tabs.size())) send(*m_tree.find("/ui/tab"), {Value(m_tabs[std::size_t(index)])});
-        });
-        m_show[tab].push_back([this](const ValueList &v) {
-            if (v.empty()) return;
-            const auto at = std::find(m_tabs.begin(), m_tabs.end(), v.front().text());
-            if (at == m_tabs.end()) return;
-            const QSignalBlocker block(m_tabWidget);
-            m_tabWidget->setCurrentIndex(int(at - m_tabs.begin()));
-        });
-        if (tab->get) m_show[tab].back()(tab->get());
+    if (m_mode == Mode::Signals) { // one page: each top-level node that holds signals, with them
+        QFormLayout *form = nullptr;
+        outer->addWidget(pageOf(form));
+        for (const std::string &name : sections) {
+            const Node *node = tree.find("/" + name);
+            if (node && relevant(*node)) addRow(form, *node);
+        }
+    } else {
+        m_tabWidget = new QTabWidget;
+        outer->addWidget(m_tabWidget);
+        for (const std::string &name : sections) {
+            const Node *node = tree.find("/" + name);
+            if (!node || !relevant(*node)) continue;
+            QFormLayout *form = nullptr;
+            QScrollArea *scroll = pageOf(form);
+            fill(form, *node);
+            m_tabWidget->addTab(scroll, fromStd(node->displayLabel()));
+            m_tabs.push_back(name);
+        }
+        // The tab is the node "/ui/tab": the user's click writes it, and a write to it (OSC, another widget) moves the tab
+        if (const Node *tab = tree.find("/ui/tab")) {
+            QObject::connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
+                if (index >= 0 && index < int(m_tabs.size())) send(*m_tree.find("/ui/tab"), {Value(m_tabs[std::size_t(index)])});
+            });
+            m_show[tab].push_back([this](const ValueList &v) {
+                if (v.empty()) return;
+                const auto at = std::find(m_tabs.begin(), m_tabs.end(), v.front().text());
+                if (at == m_tabs.end()) return;
+                const QSignalBlocker block(m_tabWidget);
+                m_tabWidget->setCurrentIndex(int(at - m_tabs.begin()));
+            });
+            if (tab->get) m_show[tab].back()(tab->get());
+        }
     }
 
     m_observer = m_tree.addObserver([this](const Node &node, const ValueList &values) {
@@ -279,12 +294,27 @@ Panel::~Panel()
     m_tree.removeObserver(m_observer);
 }
 
+// What each mode shows: the controls, everything but the signals (and the nodes that are empty to begin with: they are part of the
+// structure to see); the signals, only them, and the nodes that hold some
+bool Panel::relevant(const Node &node) const
+{
+    const bool only = m_mode == Mode::Signals;
+    if (!node.isContainer()) return only ? node.kind() == Kind::Signal : node.kind() != Kind::Signal;
+    bool listed = false;
+    for (const auto &entry : node.children()) {
+        if (entry.second->attached) continue;
+        listed = true;
+        if (relevant(*entry.second)) return true;
+    }
+    return !only && !listed;
+}
+
 // The rows of a node's children, in the order they were declared
 void Panel::fill(QFormLayout *form, const Node &node)
 {
     std::vector<const Node *> children;
     for (const auto &entry : node.children())
-        if (!entry.second->attached) children.push_back(entry.second.get());
+        if (!entry.second->attached && relevant(*entry.second)) children.push_back(entry.second.get());
     const auto rank = [this](const Node *n) {
         const auto found = m_order.find(n->path());
         return found == m_order.end() ? int(m_order.size()) : found->second;
@@ -295,7 +325,9 @@ void Panel::fill(QFormLayout *form, const Node &node)
 
 void Panel::addRow(QFormLayout *form, const Node &node)
 {
-    const bool holds = node.hasListedChildren();
+    bool holds = false; // it holds nodes this panel shows
+    for (const auto &entry : node.children())
+        if (!entry.second->attached && relevant(*entry.second)) holds = true;
     if (node.isContainer()) {
         auto *section = new QGroupBox(fromStd(node.displayLabel()));
         section->setObjectName("section");
@@ -308,7 +340,7 @@ void Panel::addRow(QFormLayout *form, const Node &node)
             about->setObjectName("caption");
             about->setWordWrap(true);
             inner->addRow(about);
-        } else if (!holds) {
+        } else if (!holds && !node.hasListedChildren()) {
             auto *about = new QLabel("an empty node");
             about->setObjectName("caption");
             inner->addRow(about);

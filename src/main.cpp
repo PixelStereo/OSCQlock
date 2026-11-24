@@ -4,6 +4,7 @@
 //
 // Run it, then explore it:  curl http://127.0.0.1:5678/   (or find "OSCQlock" on the network from any OSCQuery client).
 #include "Device.h"
+#include "Drawer.h"
 #include "Panel.h"
 
 #include <pxs/OscService.h>
@@ -14,6 +15,7 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -99,22 +101,45 @@ int main(int argc, char **argv)
 
     QWidget window;
     QPlainTextEdit *log = new QPlainTextEdit;
+    Drawer *drawer = nullptr;
+    int observed = 0;
     if (!cli.isSet(headless)) {
         window.setWindowTitle("OSCQlock");
-        auto *layout = new QVBoxLayout(&window);
+        auto *root = new QHBoxLayout(&window);
+        root->setSizeConstraint(QLayout::SetFixedSize); // a fixed window, as wide as the drawer is open
+        root->setSpacing(0);
+
+        // The controls: the title, the tabs, what OSC brought
+        auto *left = new QVBoxLayout;
         auto *title = new QLabel(QString("<b>%1</b> — OSCQuery http://127.0.0.1:%2/ — OSC udp %3")
                                      .arg(cli.value(name)).arg(service.httpPort()).arg(service.oscPort()));
         title->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        layout->addWidget(title);
-        layout->addWidget(new Panel(device.tree(), device.tabs(), device.declared()), 1);
+        left->addWidget(title);
+        auto *controls = new Panel(device.tree(), device.tabs(), device.declared());
+        controls->setFixedSize(700, 580);
+        left->addWidget(controls);
         auto *received = new QLabel("OSC received");
         received->setObjectName("caption");
-        layout->addWidget(received);
+        left->addWidget(received);
         log->setReadOnly(true);
         log->setMaximumBlockCount(400);
-        log->setMaximumHeight(96);
-        layout->addWidget(log);
-        window.resize(720, 760);
+        log->setFixedHeight(96);
+        left->addWidget(log);
+        root->addLayout(left);
+
+        // The signals, in a drawer of their own
+        auto *signalsPanel = new Panel(device.tree(), device.topLevel(), device.declared(), Panel::Mode::Signals);
+        drawer = new Drawer(signalsPanel, 380, "The signals the device emits");
+        root->addWidget(drawer);
+        // The drawer is the node "/ui/signals": the handle writes it, and a write to it (OSC) moves the drawer
+        const pxs::core::tree::Node *drawerNode = device.tree().find("/ui/signals");
+        drawer->onToggled([&device](bool open) { device.tree().apply("/ui/signals", {Value(open)}); });
+        if (drawerNode) {
+            observed = device.tree().addObserver([drawer, drawerNode](const pxs::core::tree::Node &node, const ValueList &v) {
+                if (&node == drawerNode && !v.empty() && v.front().truthy() != drawer->isOpen()) drawer->setOpen(v.front().truthy());
+            });
+            if (drawerNode->get) drawer->setOpen(drawerNode->get().front().truthy(), false);
+        }
         window.show();
     }
     QObject::connect(&service, &pxs::OscService::messageReceived, log, [log](const ::osc::Message &m, int accepted) {
@@ -123,5 +148,7 @@ int main(int argc, char **argv)
         log->appendPlainText(QString("%1 %2 %3%4").arg(m.address, m.types, args.join(' '), accepted ? "" : "  (refused)"));
     });
 
-    return app.exec();
+    const int result = app.exec();
+    if (observed) device.tree().removeObserver(observed);
+    return result;
 }
