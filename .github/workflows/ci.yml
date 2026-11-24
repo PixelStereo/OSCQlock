@@ -1,0 +1,44 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            qt: 6.8.3
+          - os: windows-latest
+            qt: 6.8.3
+          # Qt 6.8 links the AGL framework, gone from the macOS 26 SDK of the runner
+          - os: macos-latest
+            qt: 6.10.3
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.qt }}
+          modules: qtwebsockets
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release --parallel 3
+      # The device starts, serves its tree and answers over HTTP
+      - name: Smoke test
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          EXE=$(find build -name OSCQlock -type f -o -name OSCQlock.exe -type f | head -1)
+          "$EXE" --no-window --local --http-port 5678 --osc-port 9000 &
+          PID=$!
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:5678/ >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:5678/ | grep -q generator
+          kill $PID
