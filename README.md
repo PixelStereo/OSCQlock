@@ -37,7 +37,7 @@ can move the window: `/ui/tab values`, or the actions `/ui/tab/next` and `/ui/ta
 
 | Tab | Under | The case it is for |
 |---|---|---|
-| **Generator** | `/generator/transport` | a parameter (`play`) and actions side by side: `rewind`, `seek` (`f`), `jump` (`i`), `go_to` (`if`), `flash` (`T`) |
+| **Generator** | `/generator/transport` | parameters (`play`, `flash`) and actions side by side: `rewind`, `seek` (`f`), `jump` (`i`), `go_to` (`if`) |
 | | `/generator/wave` | parameters only: `type` (a choice), `frequency` (Hz, a step), `amplitude`, `offset`, `shift` (moves the waveform along its loop), `label` (text) |
 | | `/generator/loops` | whole numbers: `loops` (any within limits), `steps` (one among `1 2 4 8 16`: the waveform is cut into 8 x steps levels), `loop_count` (only read) |
 | | `/generator/signals` | signals only: `last_action`, and `wave` (`f`) that holds `cycle` and `done` (impulses, `N`), `above` (`T`), `phase` (`f`), `seconds` (`d`) |

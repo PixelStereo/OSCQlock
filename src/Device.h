@@ -35,7 +35,7 @@ public:
 private:
     // What the generator is: every parameter of /generator reads and writes one of these
     struct State {
-        bool play = false;
+        bool play = false, flash = false;
         std::string type = "sine", label = "OSCQlock";
         double frequency = 1.0, amplitude = 1.0, offset = 0.0, shift = 0.0;
         int loops = 0, steps = 4, loopCount = 0;
@@ -80,6 +80,5 @@ private:
     QTimer m_timer;
     QElapsedTimer m_clock;
     std::mt19937 m_rng{std::random_device{}()};
-    bool m_flash = false;
     double m_up = 0; // seconds since it started
 };

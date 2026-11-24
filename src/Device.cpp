@@ -199,6 +199,8 @@ void Device::buildGenerator()
 
     group("/generator/transport", "Transport", "A parameter and actions side by side: a switch, and what moves it");
     bound("/generator/transport/play", "Play", Parameter::Type::Bool, s.play, [](Parameter &p) { p.transient(); });
+    bound("/generator/transport/flash", "Flash", Parameter::Type::Bool, s.flash, [](Parameter &p) { p.transient(); }).description =
+        "Holds the waveform at its maximum while it is on: send true, then false";
     action("/generator/transport/rewind", "N", "Rewind", "Back to the start of the first loop", [this](const ValueList &) {
         s.pos = 0;
         s.loopCount = 0;
@@ -218,10 +220,6 @@ void Device::buildGenerator()
         s.loopCount = std::max(0, int(v.at(0).number().value_or(0.0)));
         s.pos = std::clamp(v.at(1).number().value_or(0.0), 0.0, 1.0);
         m_tree.changed("/generator/loops/loop_count");
-        return true;
-    });
-    action("/generator/transport/flash", "T", "Flash", "Hold the signal at its maximum while true", [this](const ValueList &v) {
-        m_flash = v.at(0).truthy();
         return true;
     });
 
@@ -479,7 +477,7 @@ void Device::tick()
             }
         }
     }
-    s.value = m_flash ? 1.0 : wave(s.pos + s.shift);
+    s.value = s.flash ? 1.0 : wave(s.pos + s.shift);
     m_tree.fire("/generator/signals/wave", {Value(s.value)});
     m_tree.fire("/generator/signals/wave/phase", {Value(s.pos)});
     m_tree.fire("/generator/signals/wave/seconds", {Value(s.seconds)});
