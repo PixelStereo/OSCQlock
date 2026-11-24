@@ -1,0 +1,278 @@
+name: Build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            qt: 6.8.3
+          - os: windows-latest
+            qt: 6.8.3
+          # Qt 6.8 links the AGL framework, gone from the macOS 26 SDK of the runner
+          - os: macos-latest
+            qt: 6.10.3
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ matrix.qt }}
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release --parallel 3
+      # The device starts, and its OSCQuery server answers with the tree
+      - name: Check
+        shell: bash
+        run: |
+          exe=$(python3 -c 'import json; print(json.load(open("build/application.json"))["name"])')
+          if [ -d "build/$exe.app" ]; then bin="build/$exe.app/Contents/MacOS/$exe"; elif [ -x "build/$exe" ]; then bin="build/$exe"; else bin="build/Release/$exe.exe"; fi
+          "$bin" --check
+
+  package-macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.10.3
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 3
+      - name: Package and try it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tag=dev
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          archive="$PWD/dist/OSCQlock-macos-${{ matrix.arch }}-$tag.zip"
+          app_name=$(python3 -c 'import json; print(json.load(open("build/application.json"))["name"])')
+          file "build/$app_name.app/Contents/MacOS/$app_name"
+          cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt" 2>/dev/null || { mkdir -p "build/$app_name.app/Contents/Resources"; cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt"; }
+          bash third_party/pxs-qt/scripts/package-macos.sh build/application.json build "$archive"
+          # The zip, not the folder: extracted, verified, started
+          rm -rf "$RUNNER_TEMP/smoke" && mkdir -p "$RUNNER_TEMP/smoke"
+          ditto -x -k "$archive" "$RUNNER_TEMP/smoke"
+          codesign --verify --deep --strict "$RUNNER_TEMP/smoke/$app_name.app"
+          PATH=/usr/bin:/bin "$RUNNER_TEMP/smoke/$app_name.app/Contents/MacOS/$app_name" --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OSCQlock-macos-${{ matrix.arch }}
+          path: dist/OSCQlock-macos-*.zip
+          if-no-files-found: error
+
+  package-windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.3
+          cache: true
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release --parallel 3
+      - name: Package and try it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Get-Content build/application.json -Raw | ConvertFrom-Json
+          $appName = $app.name
+          $tag = 'dev'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
+          New-Item -ItemType Directory -Path dist/package -Force | Out-Null
+          $exe = Get-ChildItem build -Recurse -Filter "$appName.exe" | Select-Object -First 1
+          if (!$exe) { throw "No executable" }
+          Copy-Item $exe.FullName dist/package/
+          # Qt, without the compiler runtime (the Visual C++ DLLs are copied below, from the compiler's own folder)
+          windeployqt --release --no-compiler-runtime "dist/package/$appName.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item LICENSE dist/package/
+          $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "x64") -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
+          if (!$crt) { throw "The Visual C++ runtime DLLs are missing" }
+          Copy-Item (Join-Path $crt.FullName "*.dll") dist/package/ -Force
+          foreach ($file in @("vcruntime140.dll", "msvcp140.dll")) { if (!(Test-Path "dist/package/$file")) { throw "Missing $file" } }
+          if (!(Get-ChildItem dist/package -Recurse -File -Filter qwindows.dll)) { throw "Missing the Qt Windows platform plugin" }
+
+          # NSIS: preinstalled on the runner, else from Chocolatey (which has its outages: tried again)
+          $compiler = Join-Path ${env:ProgramFiles(x86)} "NSIS/makensis.exe"
+          for ($try = 1; !(Test-Path $compiler) -and $try -le 4; $try++) {
+            choco install nsis --yes --no-progress
+            if (!(Test-Path $compiler)) { Start-Sleep -Seconds (20 * $try) }
+          }
+          if (!(Test-Path $compiler)) { throw "NSIS is not available" }
+          $setup = Join-Path $PWD "dist/OSCQlock-windows-x64-$tag-Setup.exe"
+          & $compiler "/DPRODUCT=OSCQlock" "/DAPP_VERSION=$($app.version)" "/DAPP_EXE=$appName.exe" "/DPAYLOAD=$PWD\dist\package" "/DOUTPUT=$setup" third_party\pxs-qt\packaging\windows.nsi
+          if ($LASTEXITCODE) { throw "makensis failed" }
+
+          # Installed in a clean folder, started with only the system in PATH: what the installer holds is all it has
+          $clean = Join-Path $env:RUNNER_TEMP "OSCQlock installed"
+          $installer = Start-Process -FilePath $setup -ArgumentList "/S /CurrentUser /D=$clean" -Wait -PassThru
+          if ($installer.ExitCode) { throw "The installer failed: $($installer.ExitCode)" }
+          $installed = Join-Path $clean "app/$appName.exe"
+          if (!(Test-Path $installed)) { throw "The installed executable is missing" }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $process = Start-Process -FilePath $installed -WorkingDirectory $clean -ArgumentList '--check' -Wait -PassThru
+          if ($process.ExitCode) { throw "The installed application failed its check: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OSCQlock-windows-x64
+          path: dist/OSCQlock-windows-x64-*-Setup.exe
+          if-no-files-found: error
+
+  package-linux:
+    name: Linux x64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfuse2
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.3
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 3
+      - name: Package and try it
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=dev
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          bash scripts/package-linux.sh build dist "$tag"
+          ls -l dist
+          # The AppImage, then the tar.gz, started with only the system's libraries: what they hold is all they have
+          rm -rf "$RUNNER_TEMP/smoke" && mkdir -p "$RUNNER_TEMP/smoke"
+          chmod +x "dist/OSCQlock-linux-x64-$tag.AppImage"
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" APPIMAGE_EXTRACT_AND_RUN=1 "dist/OSCQlock-linux-x64-$tag.AppImage" --check
+          tar -C "$RUNNER_TEMP/smoke" -xzf "dist/OSCQlock-linux-x64-$tag.tar.gz"
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" "$RUNNER_TEMP/smoke/OSCQlock-$tag/usr/bin/oscqlock" --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OSCQlock-linux-x64
+          path: |
+            dist/OSCQlock-linux-x64-*.AppImage
+            dist/OSCQlock-linux-x64-*.tar.gz
+          if-no-files-found: error
+
+  # The Raspberry Pi 4 and 5 (64-bit Raspberry Pi OS = Debian bookworm, glibc 2.36, Qt 6.4): built in a bookworm container on an arm64 runner,
+  # with Debian's own Qt, so that what runs here runs there
+  package-rpi:
+    name: Raspberry Pi (Linux arm64)
+    runs-on: ubuntu-22.04-arm
+    container: debian:bookworm
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git curl file build-essential cmake ninja-build python3 libgl1-mesa-dev \
+            qt6-base-dev qmake6 qt6-websockets-dev libqt6websockets6 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfuse2 desktop-file-utils
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 3
+      - name: Package and try it
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          tag=dev
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then tag="$GITHUB_REF_NAME"; fi
+          export QMAKE="$(command -v qmake6)"; echo "qmake: $QMAKE"; "$QMAKE" -query QT_INSTALL_PLUGINS
+          bash scripts/package-linux.sh build dist "$tag"
+          ls -l dist
+          mkdir -p "$RUNNER_TEMP/smoke"
+          chmod +x "dist/OSCQlock-linux-arm64-$tag.AppImage"
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" APPIMAGE_EXTRACT_AND_RUN=1 "dist/OSCQlock-linux-arm64-$tag.AppImage" --check
+          tar -C "$RUNNER_TEMP/smoke" -xzf "dist/OSCQlock-linux-arm64-$tag.tar.gz"
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" "$RUNNER_TEMP/smoke/OSCQlock-$tag/usr/bin/oscqlock" --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OSCQlock-linux-arm64
+          path: |
+            dist/OSCQlock-linux-arm64-*.AppImage
+            dist/OSCQlock-linux-arm64-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [test, package-macos, package-windows, package-linux, package-rpi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=("dist/OSCQlock-macos-arm64-$GITHUB_REF_NAME.zip" "dist/OSCQlock-macos-x64-$GITHUB_REF_NAME.zip" "dist/OSCQlock-windows-x64-$GITHUB_REF_NAME-Setup.exe" "dist/OSCQlock-linux-x64-$GITHUB_REF_NAME.AppImage" "dist/OSCQlock-linux-x64-$GITHUB_REF_NAME.tar.gz" "dist/OSCQlock-linux-arm64-$GITHUB_REF_NAME.AppImage" "dist/OSCQlock-linux-arm64-$GITHUB_REF_NAME.tar.gz")
+          for asset in "${assets[@]}"; do test -s "$asset"; done
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "OSCQlock $GITHUB_REF_NAME"
+          fi
+
+  # The release is made with the workflow's own token, which does not start the "published" workflow: the README is rewritten from here
+  release-downloads:
+    name: README download links
+    needs: release
+    permissions:
+      contents: write
+    uses: PixelStereo/pxs-qt/.github/workflows/release-downloads.yml@v0.37.1
+    with:
+      app: OSCQlock
+      platforms: "mac,win,linux,rpi"
+      pxs-ref: v0.37.1

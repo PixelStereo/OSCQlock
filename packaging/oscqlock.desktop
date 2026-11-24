@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OSCQlock
+Comment=A device to test OSC and OSCQuery controllers on
+Exec=oscqlock
+Icon=oscqlock
+Categories=AudioVideo;Audio;Network;Development;
+Terminal=false

@@ -23,7 +23,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE="$TYPE"
 cmake --build build --config "$TYPE" --parallel
 
 if [ "$RUN" = 1 ]; then
-    if [ -d build/OSCQlock.app ]; then exec build/OSCQlock.app/Contents/MacOS/OSCQlock "$@"; fi
-    if [ -x build/OSCQlock ]; then exec build/OSCQlock "$@"; fi
-    exec "build/$TYPE/OSCQlock.exe" "$@"
+    # The executable carries the version in its name: application.json says which
+    NAME=$(python3 -c 'import json; print(json.load(open("build/application.json"))["name"])')
+    if [ -d "build/$NAME.app" ]; then exec "build/$NAME.app/Contents/MacOS/$NAME" "$@"; fi
+    if [ -x "build/$NAME" ]; then exec "build/$NAME" "$@"; fi
+    exec "build/$TYPE/$NAME.exe" "$@"
 fi

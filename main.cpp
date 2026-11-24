@@ -16,8 +16,13 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QCommandLineParser>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -27,6 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <random>
 
 using namespace pxs::core;
@@ -288,12 +295,42 @@ private:
     bool m_flash = false;
 };
 
+// --check: the device starts and its OSCQuery server answers with the tree. For the package to be tried before it is published
+int selfTest()
+{
+    Tree tree;
+    Qlock qlock(&tree);
+    pxs::OscService service(&tree, QStringLiteral("OSCQlock"));
+    service.setLocalOnly(true);
+    if (!service.start(0, 0, false)) return 2;
+    QNetworkAccessManager net;
+    QEventLoop loop;
+    bool ok = false;
+    QNetworkReply *reply = net.get(QNetworkRequest(QUrl(QStringLiteral("http://127.0.0.1:%1/").arg(service.httpPort()))));
+    QObject::connect(reply, &QNetworkReply::finished, [&] {
+        ok = reply->error() == QNetworkReply::NoError && reply->readAll().contains("generator");
+        loop.quit();
+    });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    std::puts(ok ? "OSCQlock: ok" : "OSCQlock: the server did not serve its tree");
+    return ok ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--check") == 0) { // what CI runs on the package: no window, no display needed
+            QCoreApplication core(argc, argv);
+            return selfTest();
+        }
     QApplication app(argc, argv);
     QApplication::setApplicationName("OSCQlock");
+    QApplication::setApplicationVersion(QStringLiteral(OSCQLOCK_VERSION));
+    QApplication::setOrganizationName("Pixel Stereo");
+    QApplication::setOrganizationDomain("pixelstereo.fr");
     pxs::apply(app, pxs::graphite());
 
     QCommandLineParser cli;

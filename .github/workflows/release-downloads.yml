@@ -1,0 +1,14 @@
+name: Release downloads
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  update:
+    uses: PixelStereo/pxs-qt/.github/workflows/release-downloads.yml@v0.37.1
+    with:
+      app: OSCQlock
+      platforms: "mac,win,linux,rpi"
+      pxs-ref: v0.37.1
