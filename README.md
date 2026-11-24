@@ -14,9 +14,9 @@ explorer or a mapper (NyxMap, OSCKadran, Kadran, MpOsc…) can be tried on all o
 ```sh
 git clone --recurse-submodules https://github.com/PixelStereo/OSCQlock.git
 cd OSCQlock
-./build.sh                                  # Release build into build/ (Qt 6.4 or later; --debug for a Debug one)
-./build.sh --run                            # build, then run it: a window, OSCQuery on :5678, OSC on udp 9000, announced as "OSCQlock"
-./build.sh --run --no-window --local        # only the device, reachable from this computer
+./build.sh                                  # build into build/ and open it (Qt 6.4 or later; --no-run, --debug, --clean)
+# a window, OSCQuery on :5678, OSC on udp 9000, announced as "OSCQlock"
+./build.sh -- --no-window --local            # only the device, reachable from this computer (what follows -- goes to OSCQlock)
 curl http://127.0.0.1:5678/
 ```
 
