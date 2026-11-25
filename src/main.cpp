@@ -27,6 +27,7 @@
 #include <QWidget>
 
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 
 using namespace pxs::core;
@@ -54,7 +55,22 @@ int selfTest()
     });
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
-    bool served = !body.isEmpty();
+    // What the editor writes (its timeline, its transport) is told to the tree: the OSC feedback
+    std::vector<std::string> told;
+    const int watching = device.tree().addObserver([&told](const pxs::core::tree::Node &node, const ValueList &) { told.push_back(node.path()); });
+    Animation edited = device.timeline();
+    edited.tracks.front().wave = AnimWave::Saw;
+    edited.duration = 2;
+    device.setTimeline(edited);
+    device.control(AnimAction::Play);
+    device.tree().removeObserver(watching);
+    const auto saw = [&told](const char *path) { return std::find(told.begin(), told.end(), path) != told.end(); };
+    const pxs::core::tree::Node *type = device.tree().find("/generator/wave/type");
+    const bool feedback = saw("/generator/wave/type") && saw("/generator/timeline/duration") && saw("/generator/transport/play") && type && type->get &&
+                          type->get().front().text() == "saw";
+    if (!feedback) std::fprintf(stderr, "OSCQlock: an edit of the timeline was not told to the tree\n");
+
+    bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
     std::puts(served && problems.empty() ? "OSCQlock: ok" : "OSCQlock: the tree or the server is not what it must be");
     return served && problems.empty() ? 0 : 1;
