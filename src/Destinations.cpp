@@ -361,6 +361,77 @@ bool Destinations::send(quint64 id, const QString &path, double v)
     return done;
 }
 
+// ---- in a show file
+
+namespace {
+
+QJsonObject deviceJson(const Destination &d)
+{
+    QJsonArray addresses;
+    for (const OscAddress &a : d.addresses) addresses.append(QJsonObject{{"path", a.path}, {"type", a.type}, {"min", a.min}, {"max", a.max}});
+    QJsonObject o{{"id", double(d.id)},
+                  {"kind", d.kind == Destination::Kind::Osc ? "osc" : d.manual ? "oscquery" : "found"},
+                  {"name", d.name},
+                  {"host", d.host},
+                  {"port", int(d.port)}};
+    if (d.kind == Destination::Kind::Osc) o["addresses"] = addresses;
+    return o;
+}
+
+Destination deviceFrom(const QJsonObject &x)
+{
+    Destination d;
+    const QString kind = x.value("kind").toString();
+    d.kind = kind == QLatin1String("osc") ? Destination::Kind::Osc : Destination::Kind::OscQuery;
+    d.manual = kind == QLatin1String("oscquery");
+    d.name = x.value("name").toString();
+    d.host = x.value("host").toString();
+    d.port = quint16(x.value("port").toInt());
+    d.online = d.kind == Destination::Kind::Osc;
+    for (const QJsonValue &a : x.value("addresses").toArray()) {
+        const QJsonObject y = a.toObject();
+        d.addresses.push_back({y.value("path").toString(), y.value("type").toString("f"), y.value("min").toDouble(0), y.value("max").toDouble(1)});
+    }
+    return d;
+}
+
+} // namespace
+
+QJsonArray Destinations::showJson(const std::vector<quint64> &used) const
+{
+    QJsonArray out;
+    for (const auto &[id, e] : m_entries) {
+        const bool byHand = e->d.kind == Destination::Kind::Osc || e->d.manual;
+        if (byHand || std::find(used.begin(), used.end(), id) != used.end()) out.append(deviceJson(e->d));
+    }
+    return out;
+}
+
+std::map<quint64, quint64> Destinations::readShow(const QJsonArray &devices)
+{
+    std::map<quint64, quint64> ids;
+    // The devices made by hand go: the show's take their place
+    for (auto it = m_entries.begin(); it != m_entries.end();)
+        it = it->second->d.kind == Destination::Kind::Osc || it->second->d.manual ? m_entries.erase(it) : std::next(it);
+    for (const QJsonValue &v : devices) {
+        const QJsonObject x = v.toObject();
+        const quint64 was = quint64(x.value("id").toDouble());
+        Destination d = deviceFrom(x);
+        if (d.kind == Destination::Kind::OscQuery && !d.manual) { // found on the network: known by its name, until it is found again
+            ids[was] = idFor(d.key());
+            continue;
+        }
+        if (d.host.isEmpty() || !d.port) continue;
+        Entry &e = make(d);
+        if (d.kind == Destination::Kind::OscQuery) open(e);
+        else resolve(e);
+        ids[was] = e.d.id;
+    }
+    save();
+    emit changed();
+    return ids;
+}
+
 // ---- kept between launches: the ids, the OSC devices, the OSCQuery devices added by hand
 
 void Destinations::load()

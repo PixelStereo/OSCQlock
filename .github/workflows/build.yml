@@ -79,7 +79,6 @@ jobs:
           archive="$PWD/dist/OSCQlock-macos-${{ matrix.arch }}-$tag.zip"
           app_name=$(python3 -c 'import json; print(json.load(open("build/application.json"))["name"])')
           file "build/$app_name.app/Contents/MacOS/$app_name"
-          cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt" 2>/dev/null || { mkdir -p "build/$app_name.app/Contents/Resources"; cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt"; }
           bash third_party/pxs-qt/scripts/package-macos.sh build/application.json build "$archive"
           # The zip, not the folder: extracted, verified, started
           rm -rf "$RUNNER_TEMP/smoke" && mkdir -p "$RUNNER_TEMP/smoke"
@@ -124,7 +123,6 @@ jobs:
           # Qt, without the compiler runtime (the Visual C++ DLLs are copied below, from the compiler's own folder)
           windeployqt --release --no-compiler-runtime "dist/package/$appName.exe"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Copy-Item LICENSE dist/package/
           $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "x64") -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
           if (!$crt) { throw "The Visual C++ runtime DLLs are missing" }
           Copy-Item (Join-Path $crt.FullName "*.dll") dist/package/ -Force

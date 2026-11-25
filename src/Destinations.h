@@ -10,6 +10,7 @@
 #include <pxs/Parameter.h>
 
 #include <QHash>
+#include <QJsonArray>
 #include <QHostAddress>
 #include <QObject>
 #include <QString>
@@ -73,6 +74,13 @@ public:
     // changed (a value the same as the last one is not sent). False: no such device or address, or it cannot be reached now
     bool send(quint64 id, const QString &path, double v);
     int sent() const { return m_sent; } // messages sent since the start (shown)
+
+    // In a show file: the devices made by hand (OSC, OSCQuery by address), and those of `used` found on the network (by what they are,
+    // to be found again), each with its id in this show
+    QJsonArray showJson(const std::vector<quint64> &used) const;
+    // Back from a show file: the devices made by hand replaced by its own, the others known by what they are. What each id of the file
+    // is here (a track drives the device of the id it maps to)
+    std::map<quint64, quint64> readShow(const QJsonArray &devices);
 
 signals:
     void changed(); // a device came, went, was read or edited

@@ -1,5 +1,6 @@
 #include "GeneratorEditor.h"
 
+#include "Commands.h"
 #include "Destinations.h"
 
 #include <QCheckBox>
@@ -12,6 +13,7 @@
 #include <QTabBar>
 #include <QTimer>
 #include <QToolButton>
+#include <QUndoStack>
 #include <QVBoxLayout>
 
 using pxs::timelineview::TrackRow;
@@ -122,8 +124,8 @@ private:
 
 // ---- the editor of one timeline
 
-TimelineEditor::TimelineEditor(Device *device, QWidget *parent)
-    : pxs::timelineview::AnimEditor(device, nullptr, Layout::Side, true, parent), m_device(device)
+TimelineEditor::TimelineEditor(Device *device, QUndoStack *undo, QWidget *parent)
+    : pxs::timelineview::AnimEditor(device, undo, Layout::Side, true, parent), m_device(device)
 {
     auto *bottom = new QHBoxLayout;
     auto *add = new QPushButton(QStringLiteral("+ Track"));
@@ -198,9 +200,10 @@ bool TimelineEditor::fetch(Animation *a) const
     return true;
 }
 
-void TimelineEditor::store(const Animation &, const Animation &after, const QString &, const QString &)
+void TimelineEditor::store(const Animation &before, const Animation &after, const QString &text, const QString &mergeKey)
 {
-    m_device->setTimeline(m_id, after);
+    if (m_undo) m_undo->push(new cmd::SetTimeline(m_device, m_id, before, after, text, mergeKey));
+    else m_device->setTimeline(m_id, after);
 }
 
 void TimelineEditor::control(AnimAction action, double time)
@@ -212,7 +215,7 @@ TrackRow *TimelineEditor::makeRow(int index) { return new TargetRow(this, index)
 
 // ---- the page: the sub-tabs and the editor
 
-GeneratorPage::GeneratorPage(Device *device, QWidget *parent) : QWidget(parent), m_device(device)
+GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) : QWidget(parent), m_device(device), m_undo(undo)
 {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 6, 0, 0);
@@ -248,10 +251,16 @@ GeneratorPage::GeneratorPage(Device *device, QWidget *parent) : QWidget(parent),
     bar->addWidget(m_status);
     outer->addLayout(bar);
 
-    m_editor = new TimelineEditor(device);
+    m_editor = new TimelineEditor(device, undo);
     outer->addWidget(m_editor, 1);
 
-    connect(add, &QToolButton::clicked, this, [this] { m_device->show(m_device->addTimeline()); });
+    connect(add, &QToolButton::clicked, this, [this] {
+        const quint64 id = m_device->addTimeline();
+        const auto &all = m_device->timelines();
+        const auto at = std::find_if(all.begin(), all.end(), [id](const Device::Timeline &t) { return t.anim.id == id; });
+        if (at != all.end()) m_undo->push(new cmd::TimelineThere(m_device, at->anim, int(at - all.begin()), true));
+        m_device->show(id);
+    });
     connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
         if (m_syncing || index < 0) return;
         m_device->show(m_tabs->tabData(index).toULongLong());
@@ -263,26 +272,30 @@ GeneratorPage::GeneratorPage(Device *device, QWidget *parent) : QWidget(parent),
         if (!t) return;
         bool ok = false;
         const QString name = QInputDialog::getText(this, QStringLiteral("Rename"), QStringLiteral("Name of the timeline"), QLineEdit::Normal, t->anim.name, &ok);
-        if (ok) m_device->renameTimeline(id, name);
+        if (ok && !name.trimmed().isEmpty() && name.trimmed() != t->anim.name)
+            m_undo->push(new cmd::RenameTimeline(m_device, id, t->anim.name, name.trimmed()));
     });
 
-    device->onTimelinesChanged([this] { sync(); });
-    device->onTick([this] {
-        m_editor->poll();
-        // What each timeline does, on its sub-tab: ▶ while it plays
-        for (int i = 0; i < m_tabs->count(); ++i)
-            if (const Device::Timeline *t = m_device->timeline(m_tabs->tabData(i).toULongLong())) {
-                const QString text = (t->anim.state == AnimState::Playing ? QStringLiteral("▶  ") : QString()) + t->anim.name;
-                if (m_tabs->tabText(i) != text) m_tabs->setTabText(i, text);
-            }
-        if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
-    });
+    m_listener = device->addTimelinesListener([this] { sync(); });
     sync();
+}
+
+// A step of the device: the playhead, ▶ on the sub-tabs of the timelines that play, what was sent
+void GeneratorPage::tick()
+{
+    m_editor->poll();
+    // What each timeline does, on its sub-tab: ▶ while it plays
+    for (int i = 0; i < m_tabs->count(); ++i)
+        if (const Device::Timeline *t = m_device->timeline(m_tabs->tabData(i).toULongLong())) {
+            const QString text = (t->anim.state == AnimState::Playing ? QStringLiteral("▶  ") : QString()) + t->anim.name;
+            if (m_tabs->tabText(i) != text) m_tabs->setTabText(i, text);
+        }
+    if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
 }
 
 GeneratorPage::~GeneratorPage()
 {
-    m_device->onTimelinesChanged(nullptr);
+    m_device->forgetTimelinesListener(m_listener);
     m_device->onTick(nullptr);
 }
 
@@ -308,7 +321,12 @@ void GeneratorPage::sync()
         }
         close->disconnect(this);
         connect(close, &QToolButton::clicked, this, [this, id = all[i].anim.id] {
-            QTimer::singleShot(0, this, [this, id] { m_device->removeTimeline(id); });
+            QTimer::singleShot(0, this, [this, id] {
+                const auto &all = m_device->timelines();
+                const auto at = std::find_if(all.begin(), all.end(), [id](const Device::Timeline &t) { return t.anim.id == id; });
+                if (at == all.end() || all.size() <= 1) return;
+                m_undo->push(new cmd::TimelineThere(m_device, at->anim, int(at - all.begin()), false));
+            });
         });
         close->setVisible(all.size() > 1);
     }
