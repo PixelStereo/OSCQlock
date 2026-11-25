@@ -2,7 +2,12 @@
 
 #include <pxs/core/tree/parameter.h>
 
+#include "Destinations.h"
+
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSettings>
 
 #include <algorithm>
 #include <cmath>
@@ -154,7 +159,7 @@ void Device::said(const std::string &path, const ValueList &args)
 {
     std::string text = path;
     for (const Value &v : args) text += ' ' + (v.is<Blob>() ? std::string("<blob>") : v.text());
-    m_tree.fire("/generator/signals/last_action", {Value(text)});
+    m_tree.fire("/generator/last_action", {Value(text)});
 }
 
 void Device::relate(const std::string &parent, const std::vector<std::string> &children)
@@ -177,9 +182,15 @@ void Device::relate(const std::string &parent, const std::vector<std::string> &c
     }
 }
 
-Device::Device(QObject *parent) : QObject(parent)
+Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent)
 {
     m_tabs = {"generator", "values", "types", "actions", "access", "structure", "ui"};
+    if (m_persistent) {
+        m_saveTimer.setSingleShot(true);
+        m_saveTimer.setInterval(400);
+        connect(&m_saveTimer, &QTimer::timeout, this, [this] { writeSettings(); });
+        load();
+    }
     buildGenerator();
     buildValues();
     buildTypes();
@@ -193,14 +204,17 @@ Device::Device(QObject *parent) : QObject(parent)
     m_timer.start(20); // 50 Hz
 }
 
-// ---- /generator: what a device is
+// ---- /generator: the timelines
 
-void Device::buildGenerator()
+namespace {
+
+std::string slugOf(quint64 id) { return "timeline" + std::to_string(id); }
+
+// A track of a sine of a second between 0 and 1 on OSCQlock's own output, as a new timeline starts with
+AnimTrack firstTrack()
 {
-    // The timeline: one pass of 4 s, in a loop, a sine of a second between 0 and 1
-    m_timeline.id = 1;
-    m_timeline.name = "Generator";
     AnimTrack t;
+    t.layer = 0;
     t.param = "output";
     t.oscillator = true;
     t.wave = AnimWave::Sine;
@@ -208,204 +222,363 @@ void Device::buildGenerator()
     t.center = 0.5;
     t.amplitude = 0.5;
     t.keys = {AnimKey{0, 0, 3}, AnimKey{2, 1, 3}, AnimKey{4, 0, 3}}; // what Keys starts from
-    m_timeline.tracks = {t};
-
-    // A parameter read and written through two functions; whatever it changes beside itself is told
-    const auto param = [this](const char *path, const char *label, CoreParameter::Type type, std::function<Value()> get, std::function<void(const Value &)> set,
-                              std::function<void(CoreParameter &)> configure) -> Node & {
-        const std::string full = path;
-        auto p = std::make_unique<CoreParameter>(full.substr(full.rfind('/') + 1), label, type);
-        p->bind(std::move(get), [this, set = std::move(set)](const Value &v) {
-            const Said before = said();
-            set(v);
-            tell(before);
-        });
-        configure(*p);
-        m_declared.push_back(path);
-        return m_tree.add(path, std::move(p));
-    };
-    const auto doing = [this](AnimAction a, double time = 0) {
-        control(a, time);
-        return true;
-    };
-
-    group("/generator", "Generator", "A timeline of one track, as NyxMap's: a wave (or keys), played over passes. The editor above edits the same");
-
-    group("/generator/transport", "Transport", "Parameters and actions side by side: where the timeline is, and what moves it");
-    param("/generator/transport/play", "Play", CoreParameter::Type::Bool, [this] { return Value(m_timeline.state == AnimState::Playing); },
-          [this](const Value &v) { m_timeline.control(v.truthy() ? AnimAction::Play : AnimAction::Pause); },
-          [](CoreParameter &p) { p.transient().byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
-    bound("/generator/transport/flash", "Flash", CoreParameter::Type::Bool, s.flash, [](CoreParameter &p) { p.transient(); }).description =
-        "Holds the output at its maximum while it is on: send true, then false";
-    action("/generator/transport/rewind", "N", "Rewind", "Back to the start of the first pass", [doing](const ValueList &) { return doing(AnimAction::Rewind); });
-    action("/generator/transport/seek", "f", "Seek", "Go to a place in the pass it is in (0 to 1)", [this, doing](const ValueList &v) {
-        const double at = std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0);
-        return doing(AnimAction::Seek, m_timeline.clockAt(at * m_timeline.passDuration()));
-    });
-    action("/generator/transport/jump", "i", "Jump", "Go to the start of a pass (0: the first)", [this, doing](const ValueList &v) {
-        return doing(AnimAction::Seek, std::max(0.0, v.at(0).number().value_or(0.0)) * m_timeline.passDuration());
-    });
-    action("/generator/transport/go_to", "if", "Go to", "Go to a pass and a place in it (0 to 1)", [this, doing](const ValueList &v) {
-        const double d = m_timeline.passDuration();
-        return doing(AnimAction::Seek, std::max(0.0, v.at(0).number().value_or(0.0)) * d + std::clamp(v.at(1).number().value_or(0.0), 0.0, 1.0) * d);
-    });
-
-    group("/generator/wave", "Wave", "Parameters only: the track, a wave of its own period or keys drawn over the pass");
-    param("/generator/wave/keys", "Keys", CoreParameter::Type::Bool, [this] { return Value(!track().oscillator); },
-          [this](const Value &v) { track().oscillator = !v.truthy(); },
-          [](CoreParameter &p) { p.byDefault(Value(false)); }).description = "Off: the wave below. On: the keys drawn in the editor, over the pass";
-    param("/generator/wave/type", "Wave", CoreParameter::Type::Choice, [this] { return Value(animWaveKeys().at(int(track().wave)).toStdString()); },
-          [this](const Value &v) {
-              const int k = int(animWaveKeys().indexOf(QString::fromStdString(v.text())));
-              if (k >= 0) track().wave = AnimWave(k);
-          },
-          [](CoreParameter &p) {
-              std::vector<std::string> keys;
-              for (const QString &k : animWaveKeys()) keys.push_back(k.toStdString());
-              p.choices(keys).byDefault(Value("sine"));
-          });
-    param("/generator/wave/frequency", "Frequency", CoreParameter::Type::Float, [this] { return Value(1.0 / std::max(0.01, track().period)); },
-          [this](const Value &v) { track().period = 1.0 / std::clamp(v.number().value_or(1.0), 0.05, 20.0); },
-          [](CoreParameter &p) { p.range(0.05, 20).step(0.05).unit("frequency.hertz").byDefault(Value(1.0)).animatable(); }).description =
-        "Periods a second (the wave's period is its inverse)";
-    param("/generator/wave/amplitude", "Amplitude", CoreParameter::Type::Float, [this] { return Value(track().amplitude); },
-          [this](const Value &v) { track().amplitude = v.number().value_or(0.5); },
-          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.5)).animatable(); }).description = "How far it goes from its center, each way";
-    param("/generator/wave/center", "Center", CoreParameter::Type::Float, [this] { return Value(track().center); },
-          [this](const Value &v) { track().center = v.number().value_or(0.5); },
-          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.5)).animatable(); }).description = "What it goes around";
-    param("/generator/wave/phase", "Phase", CoreParameter::Type::Float, [this] { return Value(track().phase); },
-          [this](const Value &v) { track().phase = v.number().value_or(0.0); },
-          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.0)).animatable(); }).description =
-        "Where the wave starts in its period (1 is a whole period)";
-    bound("/generator/wave/label", "Label", CoreParameter::Type::Text, s.label, [](CoreParameter &) {});
-
-    group("/generator/timeline", "Timeline", "The passes: how long one is, how they follow one another, how many, how fast");
-    param("/generator/timeline/duration", "Duration", CoreParameter::Type::Float, [this] { return Value(m_timeline.duration); },
-          [this](const Value &v) { m_timeline.duration = std::clamp(v.number().value_or(4.0), pxs::core::timeline::Transport::kMinDuration, 3600.0); },
-          [](CoreParameter &p) { p.range(0.05, 60).limits(0.05, 3600).step(0.05).unit("time.second").byDefault(Value(4.0)); }).description =
-        "Seconds of one pass (what the keys are drawn over)";
-    param("/generator/timeline/loop", "Loop", CoreParameter::Type::Choice, [this] { return Value(animLoopKey(m_timeline.loop).toStdString()); },
-          [this](const Value &v) { m_timeline.setLoop(animLoopFromKey(QString::fromStdString(v.text())), m_timeline.repeat); },
-          [](CoreParameter &p) { p.choices({"once", "loop", "pingpong"}).byDefault(Value("loop")); }).description =
-        "Once, in a loop, or back and forth";
-    param("/generator/timeline/passes", "Passes (0: endless)", CoreParameter::Type::Int, [this] { return Value(m_timeline.repeat); },
-          [this](const Value &v) { m_timeline.setLoop(m_timeline.loop, int(v.number().value_or(0.0))); },
-          [](CoreParameter &p) { p.range(0, 100).step(1).byDefault(Value(0)); });
-    param("/generator/timeline/speed", "Speed", CoreParameter::Type::Float, [this] { return Value(m_timeline.speed); },
-          [this](const Value &v) { m_timeline.control(AnimAction::Speed, v.number().value_or(1.0)); },
-          [](CoreParameter &p) { p.range(0, 10).step(0.01).byDefault(Value(1.0)); }).description = "0: frozen where it is";
-    bound("/generator/timeline/passes_done", "Passes done", CoreParameter::Type::Int, s.passesDone, [](CoreParameter &p) { p.readOnly().range(0, 100000); });
-
-    group("/generator/signals", "Signals", "Signals only: what the generator emits, nobody writes them. The output is a signal that holds others");
-    signal("/generator/signals/last_action", "s", "Last action", "The last action received, with its address and arguments");
-    signal("/generator/signals/wave", "f", "Output", "The track's value, 50 times a second", {range(-1, 2)});
-    signal("/generator/signals/wave/cycle", "N", "Pass", "N: a pass starts (an impulse, no value)");
-    signal("/generator/signals/wave/done", "N", "Done", "N: the passes asked for are done");
-    signal("/generator/signals/wave/above", "T", "Above center", "T: the output crossed its center");
-    signal("/generator/signals/wave/phase", "f", "Progress", "f: where it is in the pass (0 to 1)", {range(0, 1)});
-    signal("/generator/signals/wave/seconds", "d", "Played", "d: seconds played, across the passes");
+    return t;
 }
 
-// ---- the timeline: the editor's, the transport
+} // namespace
 
-Device::Said Device::said() const
+void Device::buildGenerator()
+{
+    group("/generator", "Generator",
+          "The timelines, as NyxMap's: each a sub-tab, its tracks driving OSCQlock's own outputs or the devices of the network, through filters. "
+          "A node that holds nodes that hold parameters, actions, signals, or a mix");
+    action("/generator/new", "N", "New timeline", "A timeline more, shown", [this](const ValueList &) {
+        show(addTimeline());
+        return true;
+    });
+    action("/generator/new_named", "s", "New timeline, named", "A timeline more, of that name, shown", [this](const ValueList &v) {
+        show(addTimeline(QString::fromStdString(v.at(0).text())));
+        return true;
+    });
+    action("/generator/remove", "s", "Remove a timeline", "The timeline of that slug (timeline2…) goes (the last one stays)", [this](const ValueList &v) {
+        for (const Timeline &t : m_timelines)
+            if (t.slug == v.at(0).text()) return removeTimeline(t.anim.id);
+        return false;
+    });
+    signal("/generator/last_action", "s", "Last action", "The last action received, with its address and arguments");
+    if (m_timelines.empty()) addTimeline();
+    buildShown();
+}
+
+void Device::buildShown()
+{
+    m_tree.remove("/generator/shown");
+    std::vector<std::string> slugs;
+    for (const Timeline &t : m_timelines) slugs.push_back(t.slug);
+    if (std::find(slugs.begin(), slugs.end(), s.shown) == slugs.end()) s.shown = slugs.empty() ? std::string() : slugs.front();
+    auto p = std::make_unique<CoreParameter>("shown", "Shown", CoreParameter::Type::Choice);
+    p->choices(slugs).byDefault(Value(slugs.empty() ? std::string() : slugs.front())).transient();
+    p->bind([this] { return Value(s.shown); },
+            [this](const Value &v) {
+                for (const Timeline &t : m_timelines)
+                    if (t.slug == v.text()) {
+                        s.shown = t.slug;
+                        if (m_timelinesChanged) m_timelinesChanged();
+                    }
+            });
+    Node &n = m_tree.add("/generator/shown", std::move(p));
+    n.description = "The timeline the window shows (its sub-tab), by its slug. A parameter that holds actions";
+    auto move = [this](int by) {
+        if (m_timelines.empty()) return false;
+        int at = 0;
+        for (size_t i = 0; i < m_timelines.size(); ++i)
+            if (m_timelines[i].slug == s.shown) at = int(i);
+        const int n = int(m_timelines.size());
+        s.shown = m_timelines[size_t((at + by + n) % n)].slug;
+        m_tree.changed("/generator/shown");
+        if (m_timelinesChanged) m_timelinesChanged();
+        return true;
+    };
+    m_tree.addAction("/generator/shown/next", "N", [move](const ValueList &) { return move(1); }, "The timeline after, round").label = "Next timeline";
+    m_tree.addAction("/generator/shown/previous", "N", [move](const ValueList &) { return move(-1); }, "The timeline before, round").label =
+        "Previous timeline";
+    m_tree.changed("/generator/shown");
+}
+
+void Device::timelinesChanged()
+{
+    buildShown();
+    if (m_timelinesChanged) m_timelinesChanged();
+    save();
+}
+
+Device::Timeline *Device::find(quint64 id)
+{
+    for (Timeline &t : m_timelines)
+        if (t.anim.id == id) return &t;
+    return nullptr;
+}
+
+const Device::Timeline *Device::timeline(quint64 id) const
+{
+    for (const Timeline &t : m_timelines)
+        if (t.anim.id == id) return &t;
+    return nullptr;
+}
+
+quint64 Device::addTimeline(const QString &name)
+{
+    Timeline t;
+    t.anim.id = m_nextTimeline++;
+    t.anim.name = name.trimmed().isEmpty() ? QStringLiteral("Timeline %1").arg(t.anim.id) : name.trimmed();
+    t.anim.duration = 4;
+    t.anim.setLoop(AnimLoop::Loop, 0);
+    t.anim.tracks = {firstTrack()};
+    t.slug = slugOf(t.anim.id);
+    m_timelines.push_back(std::move(t));
+    buildTimeline(m_timelines.back());
+    if (m_tree.find("/generator/shown")) timelinesChanged();
+    return m_timelines.back().anim.id;
+}
+
+bool Device::removeTimeline(quint64 id)
+{
+    if (m_timelines.size() <= 1) return false;
+    const auto it = std::find_if(m_timelines.begin(), m_timelines.end(), [id](const Timeline &t) { return t.anim.id == id; });
+    if (it == m_timelines.end()) return false;
+    m_tree.remove(base(*it));
+    const std::string prefix = ":" + std::to_string(id) + ":";
+    for (auto f = m_filters.begin(); f != m_filters.end();)
+        f = f->first.contains(QString::fromStdString(prefix)) ? m_filters.erase(f) : std::next(f);
+    m_timelines.erase(it);
+    timelinesChanged();
+    return true;
+}
+
+void Device::renameTimeline(quint64 id, const QString &name)
+{
+    Timeline *t = find(id);
+    if (!t || name.trimmed().isEmpty() || t->anim.name == name.trimmed()) return;
+    const Said before = said(*t);
+    t->anim.name = name.trimmed();
+    if (Node *n = m_tree.find(base(*t))) n->label = t->anim.name.toStdString();
+    tell(*t, before);
+    if (m_timelinesChanged) m_timelinesChanged();
+    save();
+}
+
+quint64 Device::shown() const
+{
+    for (const Timeline &t : m_timelines)
+        if (t.slug == s.shown) return t.anim.id;
+    return m_timelines.empty() ? 0 : m_timelines.front().anim.id;
+}
+
+void Device::show(quint64 id)
+{
+    const Timeline *t = timeline(id);
+    if (!t || t->slug == s.shown) return;
+    s.shown = t->slug;
+    m_tree.changed("/generator/shown");
+    if (m_timelinesChanged) m_timelinesChanged();
+}
+
+void Device::buildTimeline(Timeline &tl)
+{
+    const quint64 id = tl.anim.id;
+    const std::string b = base(tl);
+    // A parameter of this timeline, read and written through two functions; whatever it changes beside itself is told
+    const auto param = [this, id](const std::string &path, const char *label, CoreParameter::Type type, std::function<Value(const Timeline &)> get,
+                                  std::function<void(Timeline &, const Value &)> set, std::function<void(CoreParameter &)> configure) -> Node & {
+        auto p = std::make_unique<CoreParameter>(path.substr(path.rfind('/') + 1), label, type);
+        p->bind([this, id, get = std::move(get)] {
+                    const Timeline *t = timeline(id);
+                    return t ? get(*t) : Value();
+                },
+                [this, id, set = std::move(set)](const Value &v) {
+                    Timeline *t = find(id);
+                    if (!t) return;
+                    const Said before = said(*t);
+                    set(*t, v);
+                    tell(*t, before);
+                    save();
+                });
+        configure(*p);
+        return m_tree.add(path, std::move(p));
+    };
+    const auto act = [this](const std::string &path, const char *type, const char *label, const char *description, std::function<bool(const ValueList &)> run) {
+        m_tree.addAction(path, type, [this, path, run = std::move(run)](const ValueList &v) {
+            if (!run(v)) return false;
+            said(path, v);
+            return true;
+        }, description).label = label;
+    };
+
+    Node &top = m_tree.add(b);
+    top.label = tl.anim.name.toStdString();
+    top.description = "A timeline: its transport, its passes, its tracks (each the value it says, after its filters)";
+    param(b + "/name", "Name", CoreParameter::Type::Text, [](const Timeline &t) { return Value(t.anim.name.toStdString()); },
+          [this](Timeline &t, const Value &v) {
+              if (v.text().empty()) return;
+              t.anim.name = QString::fromStdString(v.text());
+              if (Node *n = m_tree.find(base(t))) n->label = v.text();
+              if (m_timelinesChanged) m_timelinesChanged();
+          },
+          [](CoreParameter &p) { p.byDefault(Value("Timeline")); });
+
+    m_tree.add(b + "/transport").label = "Transport";
+    param(b + "/transport/play", "Play", CoreParameter::Type::Bool, [](const Timeline &t) { return Value(t.anim.state == AnimState::Playing); },
+          [](Timeline &t, const Value &v) { t.anim.control(v.truthy() ? AnimAction::Play : AnimAction::Pause); },
+          [](CoreParameter &p) { p.transient().byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
+    act(b + "/transport/stop", "N", "Stop", "Stops, back to the start", [this, id](const ValueList &) {
+        control(id, AnimAction::Stop);
+        return true;
+    });
+    act(b + "/transport/rewind", "N", "Rewind", "Back to the start of the first pass", [this, id](const ValueList &) {
+        control(id, AnimAction::Rewind);
+        return true;
+    });
+    act(b + "/transport/seek", "f", "Seek", "Go to a place in the pass it is in (0 to 1)", [this, id](const ValueList &v) {
+        const Timeline *t = timeline(id);
+        if (!t) return false;
+        control(id, AnimAction::Seek, t->anim.clockAt(std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0) * t->anim.passDuration()));
+        return true;
+    });
+
+    m_tree.add(b + "/timeline").label = "Passes";
+    param(b + "/timeline/duration", "Duration", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.duration); },
+          [](Timeline &t, const Value &v) { t.anim.duration = std::clamp(v.number().value_or(4.0), pxs::core::timeline::Transport::kMinDuration, 3600.0); },
+          [](CoreParameter &p) { p.range(0.05, 60).limits(0.05, 3600).step(0.05).unit("time.second").byDefault(Value(4.0)); }).description =
+        "Seconds of one pass (what the keys are drawn over)";
+    param(b + "/timeline/loop", "Loop", CoreParameter::Type::Choice, [](const Timeline &t) { return Value(animLoopKey(t.anim.loop).toStdString()); },
+          [](Timeline &t, const Value &v) { t.anim.setLoop(animLoopFromKey(QString::fromStdString(v.text())), t.anim.repeat); },
+          [](CoreParameter &p) { p.choices({"once", "loop", "pingpong"}).byDefault(Value("loop")); }).description = "Once, in a loop, or back and forth";
+    param(b + "/timeline/passes", "Passes (0: endless)", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.anim.repeat); },
+          [](Timeline &t, const Value &v) { t.anim.setLoop(t.anim.loop, int(v.number().value_or(0.0))); },
+          [](CoreParameter &p) { p.range(0, 100).step(1).byDefault(Value(0)); });
+    param(b + "/timeline/speed", "Speed", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.speed); },
+          [](Timeline &t, const Value &v) { t.anim.control(AnimAction::Speed, v.number().value_or(1.0)); },
+          [](CoreParameter &p) { p.range(0, 10).step(0.01).byDefault(Value(1.0)); }).description = "0: frozen where it is";
+    param(b + "/timeline/passes_done", "Passes done", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.passesDone); },
+          [](Timeline &, const Value &) {}, [](CoreParameter &p) { p.readOnly().range(0, 100000); });
+
+    m_tree.add(b + "/signals").label = "Signals";
+    m_tree.addSignal(b + "/signals/cycle", "N", "N: a pass starts (an impulse, no value)").label = "Pass";
+    m_tree.addSignal(b + "/signals/done", "N", "N: the passes asked for are done").label = "Done";
+    Node &progress = m_tree.addSignal(b + "/signals/progress", "f", "f: where it is in the pass (0 to 1)");
+    progress.label = "Progress";
+    progress.range = {range(0, 1)};
+    m_tree.addSignal(b + "/signals/seconds", "d", "d: seconds played, across the passes").label = "Played";
+    act(b + "/remove", "N", "Remove", "This timeline goes (the last one stays)", [this, id](const ValueList &) { return removeTimeline(id); });
+    buildTracks(tl);
+}
+
+void Device::buildTracks(Timeline &t)
+{
+    const std::string b = base(t) + "/tracks";
+    m_tree.remove(b);
+    t.builtTracks = t.anim.tracks.size();
+    t.values.assign(t.anim.tracks.size(), std::numeric_limits<double>::quiet_NaN());
+    Node &group = m_tree.add(b);
+    group.label = "Tracks";
+    group.description = "What each track says now, after its filters (whatever it drives)";
+    for (size_t i = 0; i < t.anim.tracks.size(); ++i) {
+        const AnimTrack &track = t.anim.tracks[i];
+        const QString where = m_destinations && track.layer ? m_destinations->nameOf(track.layer) : QStringLiteral("OSCQlock");
+        Node &v = m_tree.addSignal(b + "/" + std::to_string(i + 1), "f", (where + QStringLiteral(" › ") + track.param).toStdString());
+        v.label = QStringLiteral("Track %1").arg(i + 1).toStdString();
+    }
+}
+
+void Device::setDestinations(Destinations *destinations)
+{
+    m_destinations = destinations;
+    for (Timeline &t : m_timelines) buildTracks(t);
+}
+
+// ---- the timelines: the editor's, the transport
+
+Device::Said Device::said(const Timeline &t) const
 {
     Said d;
-    d.play = m_timeline.state == AnimState::Playing;
-    d.keys = !track().oscillator;
-    d.wave = int(track().wave);
-    d.frequency = 1.0 / std::max(0.01, track().period);
-    d.amplitude = track().amplitude;
-    d.center = track().center;
-    d.phase = track().phase;
-    d.duration = m_timeline.duration;
-    d.loop = int(m_timeline.loop);
-    d.repeat = m_timeline.repeat;
-    d.speed = m_timeline.speed;
-    d.passesDone = passesDone();
+    d.play = t.anim.state == AnimState::Playing;
+    d.duration = t.anim.duration;
+    d.loop = int(t.anim.loop);
+    d.repeat = t.anim.repeat;
+    d.speed = t.anim.speed;
+    d.passesDone = passesDone(t);
+    d.name = t.anim.name.toStdString();
     return d;
 }
 
-void Device::tell(const Said &before)
+void Device::tell(const Timeline &t, const Said &before)
 {
-    const Said now = said();
-    s.passesDone = now.passesDone;
-    const auto told = [this](bool differs, const char *path) {
-        if (differs) m_tree.changed(path);
+    const Said now = said(t);
+    if (Timeline *x = find(t.anim.id)) x->passesDone = now.passesDone;
+    const std::string b = base(t);
+    const auto told = [this, &b](bool differs, const char *path) {
+        if (differs) m_tree.changed(b + path);
     };
-    told(before.play != now.play, "/generator/transport/play");
-    told(before.keys != now.keys, "/generator/wave/keys");
-    told(before.wave != now.wave, "/generator/wave/type");
-    told(before.frequency != now.frequency, "/generator/wave/frequency");
-    told(before.amplitude != now.amplitude, "/generator/wave/amplitude");
-    told(before.center != now.center, "/generator/wave/center");
-    told(before.phase != now.phase, "/generator/wave/phase");
-    told(before.duration != now.duration, "/generator/timeline/duration");
-    told(before.loop != now.loop, "/generator/timeline/loop");
-    told(before.repeat != now.repeat, "/generator/timeline/passes");
-    told(before.speed != now.speed, "/generator/timeline/speed");
-    told(before.passesDone != now.passesDone, "/generator/timeline/passes_done");
+    told(before.play != now.play, "/transport/play");
+    told(before.duration != now.duration, "/timeline/duration");
+    told(before.loop != now.loop, "/timeline/loop");
+    told(before.repeat != now.repeat, "/timeline/passes");
+    told(before.speed != now.speed, "/timeline/speed");
+    told(before.passesDone != now.passesDone, "/timeline/passes_done");
+    told(before.name != now.name, "/name");
 }
 
-int Device::passesDone() const
+int Device::passesDone(const Timeline &t) const
 {
-    if (m_timeline.state == AnimState::Stopped && m_timeline.clock <= 0) return 0;
-    return int(std::floor(std::min(m_timeline.clock, m_timeline.length()) / m_timeline.passDuration() + 1e-9));
+    if (t.anim.state == AnimState::Stopped && t.anim.clock <= 0) return 0;
+    return int(std::floor(std::min(t.anim.clock, t.anim.length()) / t.anim.passDuration() + 1e-9));
 }
 
-void Device::setTimeline(const Animation &edited)
+void Device::setTimeline(quint64 id, const Animation &edited)
 {
-    const Said before = said();
+    Timeline *t = find(id);
+    if (!t) return;
+    const Said before = said(*t);
     // What it is comes from the editor, where it is stays (as NyxMap keeps a timeline that is edited while it plays)
     Animation next = edited;
-    next.id = m_timeline.id;
-    next.state = m_timeline.state;
-    next.clock = m_timeline.clock;
-    next.oscillatorOffset = m_timeline.oscillatorOffset;
-    next.reversed = m_timeline.reversed;
-    next.loop = m_timeline.loop;
-    next.repeat = m_timeline.repeat;
+    next.id = t->anim.id;
+    next.state = t->anim.state;
+    next.clock = t->anim.clock;
+    next.oscillatorOffset = t->anim.oscillatorOffset;
+    next.reversed = t->anim.reversed;
+    next.loop = t->anim.loop;
+    next.repeat = t->anim.repeat;
     next.setLoop(edited.loop, edited.repeat);
-    if (next.tracks.empty()) next.tracks = m_timeline.tracks; // the generator always has its track
-    next.tracks.resize(1);
-    sortAnimKeys(next.tracks.front());
-    m_timeline = next;
-    tell(before);
+    for (AnimTrack &track : next.tracks) sortAnimKeys(track);
+    bool targets = next.tracks.size() != t->anim.tracks.size();
+    for (size_t i = 0; !targets && i < next.tracks.size(); ++i)
+        targets = next.tracks[i].layer != t->anim.tracks[i].layer || next.tracks[i].param != t->anim.tracks[i].param;
+    t->anim = next;
+    if (targets) buildTracks(*t);
+    tell(*t, before);
+    save();
 }
 
-void Device::control(AnimAction action, double time)
+void Device::control(quint64 id, AnimAction action, double time)
 {
-    const Said before = said();
-    m_timeline.control(action, time);
-    tell(before);
+    Timeline *t = find(id);
+    if (!t) return;
+    const Said before = said(*t);
+    t->anim.control(action, time);
+    tell(*t, before);
 }
 
-AnimationPlayback Device::playback() const
+AnimationPlayback Device::playback(quint64 id) const
 {
     AnimationPlayback p;
-    p.id = m_timeline.id;
-    p.name = m_timeline.name;
-    p.state = m_timeline.state;
-    p.loop = m_timeline.loop;
-    p.position = m_timeline.position();
-    p.duration = m_timeline.duration;
-    p.clock = m_timeline.clock;
-    p.played = m_timeline.played();
-    p.speed = m_timeline.speed;
-    p.length = m_timeline.length();
-    p.backwards = m_timeline.backwardsAt(m_timeline.clock);
-    p.tracks = 1;
-    p.pass = m_timeline.pass();
-    p.captured = {std::numeric_limits<double>::quiet_NaN()};
+    const Timeline *t = timeline(id);
+    if (!t) return p;
+    const Animation &a = t->anim;
+    p.id = a.id;
+    p.name = a.name;
+    p.state = a.state;
+    p.loop = a.loop;
+    p.position = a.position();
+    p.duration = a.duration;
+    p.clock = a.clock;
+    p.played = a.played();
+    p.speed = a.speed;
+    p.length = a.length();
+    p.backwards = a.backwardsAt(a.clock);
+    p.tracks = int(a.tracks.size());
+    p.pass = a.pass();
+    p.captured.assign(a.tracks.size(), std::numeric_limits<double>::quiet_NaN());
+    p.capturedRgb.assign(a.tracks.size(), {0, 0, 0});
+    p.capturedXy.assign(a.tracks.size(), {0, 0});
     return p;
 }
 
-std::vector<::ParamInfo> Device::animatableParams(quint64) const
+std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
 {
+    if (holder && m_destinations) return m_destinations->params(holder);
     ::ParamInfo p;
     p.path = "output";
-    p.label = "Generator › Output";
+    p.label = "Output (its own signal, /generator/<timeline>/tracks/<n>)";
     p.min = 0;
     p.max = 1;
     p.lo = -1;
@@ -414,11 +587,95 @@ std::vector<::ParamInfo> Device::animatableParams(quint64) const
     return {p};
 }
 
-bool Device::animParamValue(quint64, const QString &path, double *value) const
+bool Device::animParamValue(quint64 holder, const QString &path, double *value) const
 {
+    if (holder) return m_destinations && m_destinations->value(holder, path, value);
     if (path != "output") return false;
     *value = s.value;
     return true;
+}
+
+bool Device::animationFilterSignal(quint64 holder, quint64 timeline, const QString &path, double *input, std::vector<double> *stages) const
+{
+    const auto it = m_filters.find(QString::number(holder) + ":" + QString::number(timeline) + ":" + path);
+    if (it == m_filters.end() || !it->second.processor.level()) return false;
+    if (input) *input = *it->second.processor.level();
+    if (stages) *stages = it->second.processor.stageOutputs();
+    return true;
+}
+
+// A track's value through its filters (pxs-core's, as NyxMap runs those of its timelines)
+double Device::filtered(const Timeline &t, size_t index, double raw, double dt)
+{
+    const AnimTrack &track = t.anim.tracks[index];
+    if (track.dataFilters.isEmpty() || !std::isfinite(raw)) return raw;
+    FilterState &state = m_filters[QString::number(track.layer) + ":" + QString::number(t.anim.id) + ":" + track.param];
+    const double played = t.anim.played();
+    if (played < state.played) state.processor.reset(); // it went back: the filters from scratch
+    state.played = played;
+    if (state.definition != track.dataFilters) {
+        state.config.filters = Interaction::filtersFromJson(QJsonObject{{"filters", track.dataFilters}});
+        state.definition = track.dataFilters;
+    }
+    state.processor.input(state.config, raw);
+    return state.processor.step(state.config, dt).value_or(raw);
+}
+
+// ---- kept between launches: the timelines (their transport, their tracks and what each drives)
+
+void Device::save()
+{
+    if (m_persistent) m_saveTimer.start();
+}
+
+void Device::writeSettings()
+{
+    QJsonArray list;
+    for (const Timeline &t : m_timelines) {
+        QJsonObject o{{"id", double(t.anim.id)}, {"name", t.anim.name}};
+        animTransportToJson(t.anim, o);
+        QJsonArray tracks;
+        for (const AnimTrack &track : t.anim.tracks) {
+            QJsonObject j;
+            animTrackToJson(track, j);
+            j["holder"] = double(track.layer);
+            j["path"] = track.param;
+            j["enabled"] = track.enabled;
+            tracks.append(j);
+        }
+        o["tracks"] = tracks;
+        list.append(o);
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("timelines"), QJsonDocument(list).toJson(QJsonDocument::Compact));
+    settings.setValue(QStringLiteral("shown"), QString::fromStdString(s.shown));
+}
+
+void Device::load()
+{
+    const QJsonArray list = QJsonDocument::fromJson(QSettings().value(QStringLiteral("timelines")).toByteArray()).array();
+    for (const QJsonValue &v : list) {
+        const QJsonObject o = v.toObject();
+        Timeline t;
+        t.anim.id = quint64(o.value("id").toDouble());
+        if (!t.anim.id || timeline(t.anim.id)) continue;
+        t.anim.name = o.value("name").toString(QStringLiteral("Timeline"));
+        animTransportFromJson(t.anim, o);
+        for (const QJsonValue &x : o.value("tracks").toArray()) {
+            const QJsonObject j = x.toObject();
+            AnimTrack track;
+            animTrackFromJson(track, j, t.anim.duration);
+            track.layer = quint64(j.value("holder").toDouble());
+            track.param = j.value("path").toString();
+            track.enabled = j.value("enabled").toBool(true);
+            t.anim.tracks.push_back(track);
+        }
+        t.slug = slugOf(t.anim.id);
+        m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
+        m_timelines.push_back(std::move(t));
+        buildTimeline(m_timelines.back());
+    }
+    s.shown = QSettings().value(QStringLiteral("shown")).toString().toStdString();
 }
 
 // ---- /values: a parameter that holds its components
@@ -617,38 +874,57 @@ void Device::tick()
         s.uptime = int(m_up);
         m_tree.changed("/access/read_only");
     }
-    if (m_timeline.state == AnimState::Playing) {
-        const Said before = said();
-        const int pass = m_timeline.pass();
-        const bool more = m_timeline.advance(dt);
-        if (m_timeline.pass() != pass) { // a new pass
-            m_tree.fire("/generator/signals/wave/cycle");
-            m_tree.fire("/structure/mixed/pulse");
-            const std::string text = "pass " + std::to_string(m_timeline.pass());
-            m_tree.fire("/signals/text", {Value(text)});
-            m_tree.fire("/signals/text/length", {Value(int(text.size()))});
+    for (Timeline &t : m_timelines) {
+        const std::string b = base(t);
+        if (t.anim.state == AnimState::Playing) {
+            const Said before = said(t);
+            const int pass = t.anim.pass();
+            const bool more = t.anim.advance(dt);
+            if (t.anim.pass() != pass) { // a new pass
+                m_tree.fire(b + "/signals/cycle");
+                if (&t == &m_timelines.front()) {
+                    m_tree.fire("/structure/mixed/pulse");
+                    const std::string text = "pass " + std::to_string(t.anim.pass());
+                    m_tree.fire("/signals/text", {Value(text)});
+                    m_tree.fire("/signals/text/length", {Value(int(text.size()))});
+                }
+            }
+            if (!more) { // its passes are done: it stops where it ends, its last value held
+                t.anim.state = AnimState::Stopped;
+                m_tree.fire(b + "/signals/done");
+            }
+            tell(t, before);
         }
-        if (!more) { // its passes are done: it stops where it ends, its last value held
-            m_timeline.state = AnimState::Stopped;
-            m_tree.fire("/generator/signals/wave/done");
+        if (t.builtTracks != t.anim.tracks.size()) buildTracks(t);
+        const double position = t.anim.position(), played = t.anim.played();
+        for (size_t i = 0; i < t.anim.tracks.size(); ++i) {
+            const AnimTrack &track = t.anim.tracks[i];
+            if (!track.enabled || track.param.isEmpty() || track.event || track.color || track.isPoint()) continue;
+            const double v = filtered(t, i, track.valueAt(position, played), dt);
+            if (!std::isfinite(v)) continue;
+            t.values[i] = v;
+            m_tree.fire(b + "/tracks/" + std::to_string(i + 1), {Value(float(v))});
+            if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v);
         }
-        tell(before);
+        m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});
+        m_tree.fire(b + "/signals/seconds", {Value(t.anim.played())});
     }
-    const double v = track().valueAt(m_timeline.position(), m_timeline.played());
-    s.value = s.flash ? track().center + track().amplitude : std::isfinite(v) ? v : track().center;
-    m_tree.fire("/generator/signals/wave", {Value(s.value)});
-    m_tree.fire("/generator/signals/wave/phase", {Value(m_timeline.progress())});
-    m_tree.fire("/generator/signals/wave/seconds", {Value(m_timeline.played())});
+    // The test signals follow the first track of the first timeline
+    const Timeline &first = m_timelines.front();
+    if (!first.values.empty() && std::isfinite(first.values.front())) s.value = first.values.front();
     m_tree.fire("/signals/xy", {Value(float(std::clamp(s.value, 0.0, 1.0))), Value(float(std::clamp(1 - s.value, 0.0, 1.0)))});
     m_tree.fire("/signals/rgb", {Value(float(std::clamp(s.value * s.r, 0.0, 1.0))), Value(float(std::clamp(s.value * s.g, 0.0, 1.0))),
                                       Value(float(std::clamp(s.value * s.b, 0.0, 1.0)))});
     m_tree.fire("/signals/stamp", {Value(std::int64_t(QDateTime::currentMSecsSinceEpoch()))});
     const std::uint8_t level = std::uint8_t(std::clamp(s.value, 0.0, 1.0) * 255);
     m_tree.fire("/signals/digest", {Value(Blob{level, std::uint8_t(255 - level), level, std::uint8_t(255 - level)})});
-    const bool above = s.value > track().center;
-    if (above != s.above) {
-        s.above = above;
-        m_tree.fire("/generator/signals/wave/above", {Value(above)});
-    }
     if (m_ticked) m_ticked();
+}
+
+Device::~Device()
+{
+    if (m_saveTimer.isActive()) { // an edit not kept yet
+        m_saveTimer.stop();
+        writeSettings();
+    }
 }

@@ -229,7 +229,8 @@ QWidget *captionFor(const Node &node)
 
 } // namespace
 
-Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order, Mode mode, QWidget *parent)
+Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order, Mode mode,
+             const std::map<std::string, QWidget *> &pages, QWidget *parent)
     : QWidget(parent), m_tree(tree), m_mode(mode)
 {
     for (std::size_t i = 0; i < order.size(); ++i) m_order[order[i]] = int(i);
@@ -259,7 +260,13 @@ Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::ve
         outer->addWidget(m_tabWidget);
         for (const std::string &name : sections) {
             const Node *node = tree.find("/" + name);
-            if (!node || !relevant(*node)) continue;
+            if (!node) continue;
+            if (const auto custom = pages.find(name); custom != pages.end()) {
+                m_tabWidget->addTab(custom->second, fromStd(node->displayLabel()));
+                m_tabs.push_back(name);
+                continue;
+            }
+            if (!relevant(*node)) continue;
             QFormLayout *form = nullptr;
             QScrollArea *scroll = pageOf(form);
             fill(form, *node);

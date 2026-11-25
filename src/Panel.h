@@ -10,6 +10,7 @@
 #include <QWidget>
 
 #include <functional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,8 +27,9 @@ public:
 
     // `sections`: the names of the top-level nodes, in order. In Controls mode the node "/ui/tab" (a choice of those names, if the tree has
     // one) is the current tab. `order`: the addresses of the nodes in the order they should be shown (what is not in it comes after, by name)
+    // `pages`: sections shown by a widget of the application's instead of their rows (Controls mode; the node is not read for them)
     Panel(pxs::core::tree::Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order = {},
-          Mode mode = Mode::Controls, QWidget *parent = nullptr);
+          Mode mode = Mode::Controls, const std::map<std::string, QWidget *> &pages = {}, QWidget *parent = nullptr);
     ~Panel() override;
     // A widget of the application's own at the top of a tab (Controls mode): `section` is the top-level node's name
     void addHead(const std::string &section, QWidget *widget);

@@ -3,7 +3,9 @@
 // mapper can be tried on all of them. The window shows the same tree, a tab for each top-level node (Panel.h).
 //
 // Run it, then explore it:  curl http://127.0.0.1:5678/   (or find "OSCQlock" on the network from any OSCQuery client).
+#include "Destinations.h"
 #include "Device.h"
+#include "DevicesWindow.h"
 #include "Drawer.h"
 #include "GeneratorEditor.h"
 #include "Panel.h"
@@ -22,12 +24,15 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPlainTextEdit>
+#include <QPushButton>
+#include <QUdpSocket>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace pxs::core;
@@ -55,20 +60,64 @@ int selfTest()
     });
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
-    // What the editor writes (its timeline, its transport) is told to the tree: the OSC feedback
+    // What the editor writes (a timeline, its transport) is told to the tree: the OSC feedback
     std::vector<std::string> told;
     const int watching = device.tree().addObserver([&told](const pxs::core::tree::Node &node, const ValueList &) { told.push_back(node.path()); });
-    Animation edited = device.timeline();
+    const quint64 first = device.timelines().front().anim.id;
+    Animation edited = device.timelines().front().anim;
     edited.tracks.front().wave = AnimWave::Saw;
     edited.duration = 2;
-    device.setTimeline(edited);
-    device.control(AnimAction::Play);
-    device.tree().removeObserver(watching);
+    device.setTimeline(first, edited);
+    device.control(first, AnimAction::Play);
     const auto saw = [&told](const char *path) { return std::find(told.begin(), told.end(), path) != told.end(); };
-    const pxs::core::tree::Node *type = device.tree().find("/generator/wave/type");
-    const bool feedback = saw("/generator/wave/type") && saw("/generator/timeline/duration") && saw("/generator/transport/play") && type && type->get &&
-                          type->get().front().text() == "saw";
+    bool feedback = saw("/generator/timeline1/timeline/duration") && saw("/generator/timeline1/transport/play");
     if (!feedback) std::fprintf(stderr, "OSCQlock: an edit of the timeline was not told to the tree\n");
+
+    // A timeline more, by OSC: its nodes are made, and it is the one shown
+    const bool made = device.tree().apply("/generator/new", {}) == 1 && device.timelines().size() == 2 && device.tree().find("/generator/timeline2/transport/play") &&
+                      device.tree().find("/generator/shown")->get().front().text() == "timeline2" && device.tree().apply("/generator/shown", {Value("timeline1")}) == 1 &&
+                      device.shown() == first;
+    if (!made) std::fprintf(stderr, "OSCQlock: a timeline made by OSC is not there, or not shown\n");
+
+    // A track that drives a plain OSC device through a filter: a value of 0.8 (keys), multiplied by 0.5, arrives as 0.4
+    QUdpSocket receiver;
+    receiver.bind(QHostAddress::LocalHost, 0);
+    Destinations destinations(QStringLiteral("OSCQlock"), service.httpPort(), false);
+    device.setDestinations(&destinations);
+    const quint64 osc = destinations.addOsc(QStringLiteral("Receiver"), QStringLiteral("127.0.0.1"), receiver.localPort());
+    destinations.setAddresses(osc, {OscAddress{QStringLiteral("/level"), QStringLiteral("f"), 0, 1}});
+    Animation sending = device.timelines().front().anim;
+    AnimTrack level;
+    level.layer = osc;
+    level.param = QStringLiteral("/level");
+    level.keys = {AnimKey{0, 0.8, 0}};
+    InteractionStage half = InteractionStage::made(InteractionFilter::Math);
+    half.op = MathOp::Multiply;
+    half.a = 0.5;
+    level.dataFilters = QJsonArray{half.toJson()};
+    sending.tracks.push_back(level);
+    device.setTimeline(first, sending);
+    double received = -1;
+    {
+        QEventLoop wait; // the device steps (50 times a second) and sends
+        QObject::connect(&receiver, &QUdpSocket::readyRead, &wait, [&] {
+            while (receiver.hasPendingDatagrams()) {
+                QByteArray packet(int(receiver.pendingDatagramSize()), 0);
+                receiver.readDatagram(packet.data(), packet.size());
+                std::vector<::osc::Message> messages;
+                if (::osc::decode(packet, messages))
+                    for (const auto &m : messages)
+                        if (m.address == QLatin1String("/level") && !m.args.isEmpty()) received = m.args.front().toDouble();
+            }
+            if (received >= 0) wait.quit();
+        });
+        QTimer::singleShot(3000, &wait, &QEventLoop::quit);
+        wait.exec();
+    }
+    const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/generator/timeline1/tracks/2");
+    if (!sent) std::fprintf(stderr, "OSCQlock: a track did not reach its OSC device through its filter (received %g)\n", received);
+    device.tree().removeObserver(watching);
+    feedback = feedback && made && sent;
 
     bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
@@ -103,10 +152,13 @@ int main(int argc, char **argv)
     QCommandLineOption local("local", "Reachable from this computer only, and not announced.");
     QCommandLineOption headless("no-window", "No window: only the device.");
     QCommandLineOption check("check", "Start, check the tree and the OSCQuery server, and exit (no window).");
-    cli.addOptions({name, oscPort, httpPort, local, headless, check});
+    QCommandLineOption screenshot("screenshot", "Save a picture of the window (PNG) once it is shown, and exit. With --tab, the tab it shows.", "file");
+    QCommandLineOption tabOption("tab", "The tab the window opens on (generator, values, types…; devices: the Devices window too).", "name");
+    cli.addOptions({name, oscPort, httpPort, local, headless, check, screenshot, tabOption});
     cli.process(app);
 
-    Device device;
+    const bool keep = !cli.isSet(screenshot); // a picture taken changes nothing that is kept
+    Device device(nullptr, keep);
     for (const std::string &problem : device.tree().check()) qWarning("OSCQlock: the tree lacks something: %s", problem.c_str()); // what every pxs tree must have
     pxs::OscService service(&device.tree(), cli.value(name));
     service.setLocalOnly(cli.isSet(local));
@@ -115,50 +167,109 @@ int main(int argc, char **argv)
         return 1;
     }
     qInfo("OSCQlock: OSCQuery on http://127.0.0.1:%d/, OSC on udp %d", service.httpPort(), service.oscPort());
+    Destinations destinations(cli.value(name), service.httpPort(), keep);
+    device.setDestinations(&destinations);
+    if (!cli.isSet(local)) destinations.startDiscovery();
 
     QWidget window;
     QPlainTextEdit *log = new QPlainTextEdit;
     Drawer *drawer = nullptr;
+    DevicesWindow *devicesWindow = nullptr;
     int observed = 0;
     if (!cli.isSet(headless)) {
         window.setWindowTitle("OSCQlock");
+        window.setMinimumSize(760, 520);
         auto *root = new QHBoxLayout(&window);
-        root->setSizeConstraint(QLayout::SetFixedSize); // a fixed window, as wide as the drawer is open
+        root->setContentsMargins(14, 10, 0, 10);
         root->setSpacing(0);
 
-        // The controls: the title, the tabs, what OSC brought
+        // The controls: a header (the name, where it is reached, the devices), the tabs, what OSC brought
         auto *left = new QVBoxLayout;
-        auto *title = new QLabel(QString("<b>%1</b> — OSCQuery http://127.0.0.1:%2/ — OSC udp %3")
-                                     .arg(cli.value(name)).arg(service.httpPort()).arg(service.oscPort()));
-        title->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        left->addWidget(title);
-        auto *controls = new Panel(device.tree(), device.tabs(), device.declared());
-        controls->addHead("generator", new GeneratorEditor(&device));
-        controls->setFixedSize(820, 640);
-        left->addWidget(controls);
+        left->setSpacing(8);
+        auto *header = new QHBoxLayout;
+        auto *brand = new QLabel(QStringLiteral("OSC<span style='color:#ff8a3d'>Q</span>lock"));
+        brand->setObjectName(QStringLiteral("brand"));
+        brand->setStyleSheet(QStringLiteral("#brand { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }"));
+        header->addWidget(brand);
+        const auto pill = [](const QString &text, const QString &tip) {
+            auto *l = new QLabel(text);
+            l->setToolTip(tip);
+            l->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            l->setStyleSheet(QStringLiteral("QLabel { border: 1px solid #3a3d44; border-radius: 10px; padding: 2px 10px; color: #c8ccd4; font-size: 11px; }"));
+            return l;
+        };
+        header->addSpacing(12);
+        header->addWidget(pill(cli.value(name), QStringLiteral("The name it announces")));
+        header->addWidget(pill(QStringLiteral("OSCQuery  http://127.0.0.1:%1/").arg(service.httpPort()), QStringLiteral("Its namespace, over HTTP and WebSocket")));
+        header->addWidget(pill(QStringLiteral("OSC  udp %1").arg(service.oscPort()), QStringLiteral("What it takes over OSC")));
+        header->addStretch(1);
+        auto *devicesButton = new QPushButton;
+        devicesButton->setObjectName(QStringLiteral("accent"));
+        devicesButton->setToolTip(QStringLiteral("The devices the tracks can drive: OSCQuery found on the network, plain OSC made here"));
+        const auto countDevices = [devicesButton, &destinations] {
+            devicesButton->setText(QStringLiteral("Devices  ·  %1").arg(destinations.all().size()));
+        };
+        countDevices();
+        QObject::connect(&destinations, &Destinations::changed, devicesButton, countDevices);
+        header->addWidget(devicesButton);
+        header->addSpacing(14);
+        left->addLayout(header);
+
+        auto *generator = new GeneratorPage(&device);
+        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}});
+        controls->setMinimumSize(640, 380);
+        controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        left->addWidget(controls, 1);
         auto *received = new QLabel("OSC received");
         received->setObjectName("caption");
         left->addWidget(received);
         log->setReadOnly(true);
         log->setMaximumBlockCount(400);
-        log->setFixedHeight(96);
+        log->setFixedHeight(84);
         left->addWidget(log);
-        root->addLayout(left);
+        root->addLayout(left, 1);
 
-        // The signals, in a drawer of their own
+        // The signals, in a drawer of their own: the window grows by it when it opens, and gives it back when it closes
         auto *signalsPanel = new Panel(device.tree(), device.topLevel(), device.declared(), Panel::Mode::Signals);
-        drawer = new Drawer(signalsPanel, 380, "The signals the device emits");
+        constexpr int drawerWidth = 380;
+        drawer = new Drawer(signalsPanel, drawerWidth, "The signals the device emits");
         root->addWidget(drawer);
+        const auto fit = [&window](bool open) {
+            if (window.isMaximized() || window.isFullScreen()) return;
+            window.resize(window.width() + (open ? drawerWidth : -drawerWidth), window.height());
+        };
         // The drawer is the node "/ui/signals": the handle writes it, and a write to it (OSC) moves the drawer
         const pxs::core::tree::Node *drawerNode = device.tree().find("/ui/signals");
-        drawer->onToggled([&device](bool open) { device.tree().apply("/ui/signals", {Value(open)}); });
+        drawer->onToggled([&device, fit](bool open) {
+            fit(open);
+            device.tree().apply("/ui/signals", {Value(open)});
+        });
         if (drawerNode) {
-            observed = device.tree().addObserver([drawer, drawerNode](const pxs::core::tree::Node &node, const ValueList &v) {
-                if (&node == drawerNode && !v.empty() && v.front().truthy() != drawer->isOpen()) drawer->setOpen(v.front().truthy());
+            observed = device.tree().addObserver([drawer, drawerNode, fit](const pxs::core::tree::Node &node, const ValueList &v) {
+                if (&node == drawerNode && !v.empty() && v.front().truthy() != drawer->isOpen()) {
+                    fit(v.front().truthy());
+                    drawer->setOpen(v.front().truthy());
+                }
             });
             if (drawerNode->get) drawer->setOpen(drawerNode->get().front().truthy(), false);
         }
+
+        devicesWindow = new DevicesWindow(&destinations, &window);
+        QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {
+            devicesWindow->show();
+            devicesWindow->raise();
+            devicesWindow->activateWindow();
+        });
+        window.resize(1180, 780);
+        if (cli.isSet(tabOption)) device.tree().apply("/ui/tab", {Value(cli.value(tabOption).toStdString())});
         window.show();
+        const bool devicesShot = cli.value(tabOption) == QLatin1String("devices"); // --tab devices: the Devices window
+        if (devicesShot) devicesWindow->show();
+        if (cli.isSet(screenshot))
+            QTimer::singleShot(1500, &window, [&window, devicesWindow, devicesShot, file = cli.value(screenshot)] {
+                (devicesShot ? static_cast<QWidget *>(devicesWindow) : &window)->grab().save(file);
+                QApplication::quit();
+            });
     }
     QObject::connect(&service, &pxs::OscService::messageReceived, log, [log](const ::osc::Message &m, int accepted) {
         QStringList args;
