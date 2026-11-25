@@ -9,7 +9,7 @@ No release yet.
 On a **Mac**, unzip, move OSCQlock to Applications and Control-click › Open the first time (it is signed ad hoc, not notarized). On **Windows**, run the installer. On **Linux** and the **Raspberry Pi** (4 and 5, 64-bit), make the AppImage executable and run it (or unpack the tar.gz).
 
 A device made to be tested against: a generator that serves an OSCQuery tree with **every kind of parameter, action and signal**, so that a controller, an
-explorer or a mapper (NyxMap, OSCKadran, Kadran, MpOsc…) can be tried on all of them.
+explorer or a mapper (NyxMap, OSCQontrol, Kadran, MpOsc…) can be tried on all of them.
 
 ```sh
 git clone --recurse-submodules https://github.com/PixelStereo/OSCQlock.git
