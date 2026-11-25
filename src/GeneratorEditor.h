@@ -5,7 +5,7 @@
 
 #include <pxs/TimelineEditor.h>
 
-class GeneratorEditor : public AnimEditor
+class GeneratorEditor : public pxs::timelineview::AnimEditor
 {
 public:
     GeneratorEditor(Device *device, QWidget *parent = nullptr);

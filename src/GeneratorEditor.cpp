@@ -1,7 +1,7 @@
 #include "GeneratorEditor.h"
 
 GeneratorEditor::GeneratorEditor(Device *device, QWidget *parent)
-    : AnimEditor(device, nullptr, Layout::Stacked, false, parent), m_device(device)
+    : pxs::timelineview::AnimEditor(device, nullptr, Layout::Stacked, false, parent), m_device(device)
 {
     reload();
     // What OSC or the parameters change is shown at once; the playhead moves with the generator's steps
