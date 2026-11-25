@@ -389,6 +389,7 @@ void Device::setDestinations(Destinations *destinations)
 {
     m_destinations = destinations;
     for (Timeline &t : m_timelines) buildTracks(t);
+    if (destinations) connect(destinations, &Destinations::changed, this, [this] { m_stale = true; }); // a device made, edited: the show too
 }
 
 // ---- the timelines: the editor's, the transport
@@ -777,13 +778,40 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     timelinesChanged();
     cuesChanged();
     writeSettings();
-    m_modified = false;
+    setSaved();
     return true;
+}
+
+QByteArray Device::snapshot() const
+{
+    std::vector<quint64> used;
+    for (const Timeline &t : m_timelines)
+        for (const AnimTrack &track : t.anim.tracks)
+            if (track.layer) used.push_back(track.layer);
+    return QJsonDocument(QJsonObject{{"timelines", timelinesJson()},
+                                     {"cues", cuesJson()},
+                                     {"devices", m_destinations ? m_destinations->showJson(used) : QJsonArray()}})
+        .toJson(QJsonDocument::Compact);
+}
+
+bool Device::modified() const
+{
+    if (m_stale) {
+        m_differs = snapshot() != m_saved;
+        m_stale = false;
+    }
+    return m_differs;
+}
+
+void Device::setSaved()
+{
+    m_saved = snapshot();
+    m_stale = true;
 }
 
 void Device::save()
 {
-    m_modified = true;
+    m_stale = true;
     if (m_persistent) m_saveTimer.start();
 }
 

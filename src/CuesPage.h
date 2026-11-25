@@ -20,6 +20,7 @@ private:
     void refresh();  // the standby, the GO button, what waits
     void store();    // the rows, as edited, to the device
     void move(int by); // the selected cue up or down
+    bool typing() const; // a cue is being edited
 
     Device *m_device;
     QTableWidget *m_table;

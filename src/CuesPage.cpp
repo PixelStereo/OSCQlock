@@ -2,12 +2,14 @@
 
 #include "Device.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QShortcut>
 #include <QSignalBlocker>
@@ -98,10 +100,14 @@ CuesPage::CuesPage(Device *device, QWidget *parent) : QWidget(parent), m_device(
     connect(stop, &QPushButton::clicked, this, [this] { m_device->stopAll(); });
     auto *space = new QShortcut(QKeySequence(Qt::Key_Space), this);
     space->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(space, &QShortcut::activated, this, [this] { m_device->go(); });
+    connect(space, &QShortcut::activated, this, [this] {
+        if (!typing()) m_device->go();
+    });
     auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     escape->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(escape, &QShortcut::activated, this, [this] { m_device->stopAll(); });
+    connect(escape, &QShortcut::activated, this, [this] {
+        if (!typing()) m_device->stopAll();
+    });
     connect(add, &QPushButton::clicked, this, [this] {
         std::vector<Device::Cue> cues = m_device->cues();
         Device::Cue c;
@@ -138,6 +144,14 @@ CuesPage::~CuesPage()
 {
     m_device->onCuesChanged(nullptr);
     m_device->forgetTimelinesListener(m_listener);
+}
+
+// A cue being edited: Space is a space and Escape cancels, not GO and Stop all
+bool CuesPage::typing() const
+{
+    const QWidget *focus = QApplication::focusWidget();
+    return qobject_cast<const QLineEdit *>(focus) || // a cell being edited is a line edit that has the focus
+           qobject_cast<const QAbstractSpinBox *>(focus) || qobject_cast<const QComboBox *>(focus);
 }
 
 void CuesPage::rebuild()

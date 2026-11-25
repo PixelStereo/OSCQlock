@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <QJsonArray>
+#include <QByteArray>
 #include <QJsonObject>
 #include <QStringList>
 
@@ -109,8 +110,10 @@ public:
 
     QJsonObject show() const;
     bool loadShow(const QJsonObject &show, QString *error = nullptr); // replaces the timelines and the cues
-    bool modified() const { return m_modified; } // since the last show() saved or loadShow()
-    void setSaved() { m_modified = false; }
+    // What a show file holds (the timelines, the cues, the devices) differs from when it was last saved or opened: a play or a seek does
+    // not count
+    bool modified() const;
+    void setSaved(); // what it holds now is what is saved
 
     pxs::core::tree::Tree &tree() { return m_tree; }
     // The top-level nodes that are tabs, in order (the signals are in a drawer of their own, not in a tab)
@@ -194,7 +197,9 @@ private:
     quint64 m_nextCue = 1;
     std::vector<std::pair<double, Cue>> m_pending; // seconds left, the cue
     std::string m_fired;                           // the name of the last cue fired
-    bool m_modified = false;
+    QByteArray snapshot() const; // what a show file holds, compact
+    QByteArray m_saved;          // the snapshot when it was last saved or opened
+    mutable bool m_stale = true, m_differs = false;
     QTimer m_timer;
     QElapsedTimer m_clock;
     std::mt19937 m_rng{std::random_device{}()};

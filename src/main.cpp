@@ -182,7 +182,13 @@ int selfTest()
     shown = shown && show::open(file, device, destinations, &why) && device.timelines().size() == timelines &&
             device.timelines().front().anim.tracks.size() == tracks && device.cues().size() == 1 && device.cues().front().name == QLatin1String("Blackout") &&
             device.timelines().front().anim.tracks[1].layer == destinations.all().back()->id;
-    if (!shown) std::fprintf(stderr, "OSCQlock: a show saved and opened again is not the same (%s)\n", qPrintable(why));
+    // Opened, it is not modified; playing does not modify it; a cue edited does
+    shown = shown && !device.modified();
+    device.control(first, AnimAction::Play);
+    shown = shown && !device.modified();
+    device.setCues({});
+    shown = shown && device.modified();
+    if (!shown) std::fprintf(stderr, "OSCQlock: a show saved and opened again is not the same, or not told modified as it should (%s)\n", qPrintable(why));
 
     device.tree().removeObserver(watching);
     feedback = feedback && made && sent && queried && cued && shown;
@@ -247,6 +253,7 @@ int main(int argc, char **argv)
             qWarning("OSCQlock: the show could not be opened: %s", qPrintable(why));
         }
     }
+    device.setSaved(); // what it starts with is what was kept: not a change
 
     QWidget window;
     QPlainTextEdit *log = new QPlainTextEdit;
@@ -347,7 +354,18 @@ int main(int argc, char **argv)
         };
         QObject::connect(saveButton, &QPushButton::clicked, &window, [saveTo, showPath] { saveTo(*showPath); });
         QObject::connect(saveAsButton, &QPushButton::clicked, &window, [saveTo] { saveTo(QString()); });
-        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title] {
+        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title, saveTo] {
+            // What would be replaced and is not in a file: saved first, or let go, or nothing opened
+            if (device.modified()) {
+                const auto answer = QMessageBox::question(&window, QStringLiteral("Open a show"),
+                                                          QStringLiteral("The show has changes that are not saved. Save them first?"),
+                                                          QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+                if (answer == QMessageBox::Cancel) return;
+                if (answer == QMessageBox::Save) {
+                    saveTo(*showPath);
+                    if (device.modified()) return; // not saved (cancelled, or it failed)
+                }
+            }
             const QString path = QFileDialog::getOpenFileName(&window, QStringLiteral("Open a show"), *showPath,
                                                               QStringLiteral("OSCQlock show (*.%1)").arg(show::kSuffix));
             if (path.isEmpty()) return;
