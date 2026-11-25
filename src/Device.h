@@ -5,12 +5,14 @@
 //   /generator   the timelines: as many as one wants, each a sub-tab of the first tab and a node /generator/<slug> (its name, transport,
 //                passes, tracks, signals). /generator/shown is the sub-tab shown; /generator/new, new_named, remove make and remove them.
 //                Their tracks drive OSCQlock's own outputs or the devices of the network (Destinations.h), through the filters of pxs-core
-//   /cues        the cue list: go, back, stop_all, fire (a cue by its number); standby (the next one), its name, the one fired
+//   /sequence    the cue list, NyxMap's sequencer (pxs/Sequencer.h): go, back, stop, stop_all, step (a step by its number); where it is,
+//                the step GO plays next, how many steps
 //   /ui          the window's own state: its tab (and the actions that move it)
 //
-// A show (the timelines, the cues, the devices made by hand) is saved in a file (show()/loadShow()) and kept between launches.
+// A show (the timelines, the sequence, the devices made by hand) is saved in a file (show()/loadShow()) and kept between launches.
 #include <pxs/TimelineHost.h>
 #include <Interactions.h>
+#include <pxs/Sequencer.h>
 #include <pxs/core/tree/tree.h>
 
 #include <QElapsedTimer>
@@ -34,7 +36,7 @@ class Destinations;
 
 // The timelines are NyxMap's (pxs-core's logic, pxs-qt's editor). Each is a node of /generator with its settings and its transport as
 // parameters, and the editor of the window edits the same timeline: both say every change to the tree.
-class Device : public QObject, public TimelineHost
+class Device : public QObject, public TimelineHost, public SequencerHost
 {
 public:
     // `persistent`: the timelines are read from the settings and kept there (the window's; --check runs without)
@@ -83,35 +85,25 @@ public:
     bool animParamValue(quint64 holder, const QString &path, double *value) const override;
     bool animationFilterSignal(quint64 holder, quint64 timeline, const QString &path, double *input, std::vector<double> *stages) const override;
 
-    // ---- the cue list: GO fires the cue on standby (after its wait), and the next one too when it continues by itself
+    // ---- the cue list: NyxMap's sequencer (pxs-qt), its steps driving the timelines. The Device is its host, and moves its waits
+    // with its own clock (on this thread: fadesManual)
 
-    enum class CueAction { Start = 0, Play, Pause, Stop, StopAll }; // Start: from the beginning
-    struct Cue {
-        quint64 id = 0;
-        QString name;
-        double wait = 0;          // seconds between GO and what it does
-        quint64 timeline = 0;     // what it acts on (StopAll: every one)
-        CueAction action = CueAction::Start;
-        bool autoContinue = false; // GO goes on to the next cue at once (its own wait counts from there)
-    };
-    const std::vector<Cue> &cues() const { return m_cues; }
-    void setCues(const std::vector<Cue> &cues); // as the window edits them (ids kept; a new one has id 0)
-    int standby() const { return m_standby; }   // the index of the next cue GO fires (cues().size(): past the end)
-    void setStandby(int index);
-    void go();
-    void back();     // the cue before is on standby
-    void stopAll();  // every timeline stopped, nothing pending
-    bool fire(int index); // that cue, now (after its wait), standby unchanged
-    int pending() const { return int(m_pending.size()); } // cues waiting to act
-    static QStringList cueActionNames(); // "Start", "Play"…
-    // The list, the standby, a cue fired: the window's
-    void onCuesChanged(std::function<void()> callback) { m_cuesChanged = std::move(callback); }
+    Sequencer &sequencer() { return m_sequencer; }
+    const Sequencer &sequencer() const { return m_sequencer; }
 
-    // ---- a show: the timelines, the cues, and (with Destinations) the devices made by hand
+    // SequencerHost: the timelines a step drives, the musical clock
+    void controlAnimation(quint64 id, AnimAction action, double value, AnimLoop loop, int repeat) override;
+    double animationPlayTime(quint64 id) const override;
+    double animationRemaining(quint64 id) const override;
+    const BeatClock &beatClock() const override { return m_beat; }
+    bool fadesManual() const override { return true; }
+    void stopAll(); // every wait and follow of the sequences stopped, and every timeline
+
+    // ---- a show: the timelines, the sequence, and (with Destinations) the devices made by hand
 
     QJsonObject show() const;
-    bool loadShow(const QJsonObject &show, QString *error = nullptr); // replaces the timelines and the cues
-    // What a show file holds (the timelines, the cues, the devices) differs from when it was last saved or opened: a play or a seek does
+    bool loadShow(const QJsonObject &show, QString *error = nullptr); // replaces the timelines and the sequence
+    // What a show file holds (the timelines, the sequence, the devices) differs from when it was last saved or opened: a play or a seek does
     // not count
     bool modified() const;
     void setSaved(); // what it holds now is what is saved
@@ -130,7 +122,7 @@ private:
     };
 
     void buildGenerator();
-    void buildCues();
+    void buildSequence();
     void buildUi();
 
     // A container, said: its label and what it is for
@@ -160,13 +152,10 @@ private:
     void timelinesChanged();
     double filtered(const Timeline &t, size_t index, double raw, double dt);
     void tick();
-    void stepCues(double dt);
-    void cuesChanged();       // the nodes of /cues told, the window, the settings
-    void act(const Cue &cue); // what a cue does, now
+    void sequenceChanged(); // the nodes of /sequence told, the settings
     QJsonArray timelinesJson() const;
-    QJsonArray cuesJson() const;
     void readTimelines(const QJsonArray &list); // into m_timelines, with their nodes
-    void readCues(const QJsonArray &list);
+    void readSequence(const QJsonObject &o); // "sequences", or the "cues" of an OSCQlock before NyxMap's sequencer
     void load();
     void save();          // soon (the settings are written a moment after the last edit)
     void writeSettings(); // now
@@ -186,18 +175,16 @@ private:
     Destinations *m_destinations = nullptr;
     bool m_persistent = false;
     QTimer m_saveTimer;
-    std::function<void()> m_ticked, m_cuesChanged;
+    std::function<void()> m_ticked;
     std::vector<std::pair<int, std::function<void()>>> m_timelinesListeners;
     int m_lastListener = 0;
     void tellTimelines() const
     {
         for (const auto &l : std::vector(m_timelinesListeners)) l.second();
     }
-    std::vector<Cue> m_cues;
-    int m_standby = 0;
-    quint64 m_nextCue = 1;
-    std::vector<std::pair<double, Cue>> m_pending; // seconds left, the cue
-    std::string m_fired;                           // the name of the last cue fired
+    pxs::Annotated<QRecursiveMutex> m_lock; // the sequencer's (everything here is on one thread: fadesManual)
+    BeatClock m_beat;
+    Sequencer m_sequencer;
     QByteArray snapshot() const; // what a show file holds, compact
     QByteArray m_saved;          // the snapshot when it was last saved or opened
     mutable bool m_stale = true, m_differs = false;

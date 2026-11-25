@@ -7,7 +7,7 @@
 #include "Device.h"
 #include "DevicesWindow.h"
 #include "Commands.h"
-#include "CuesPage.h"
+#include "SequencePage.h"
 #include "GeneratorEditor.h"
 #include "Panel.h"
 #include "Show.h"
@@ -165,14 +165,30 @@ int selfTest()
     if (!queried) std::fprintf(stderr, "OSCQlock: a track did not reach its OSCQuery device (float %g, switch %d)\n",
                                value("/generator/timeline2/timeline/speed").number().value_or(-1), int(value("/generator/timeline2/transport/play").truthy()));
 
-    // The cue list, by OSC: a cue that stops every timeline, GO fires it and the standby moves on
-    Device::Cue stopping;
-    stopping.name = QStringLiteral("Blackout");
-    stopping.action = Device::CueAction::StopAll;
-    device.setCues({stopping});
-    const bool cued = device.tree().apply("/cues/go", {}) == 1 && device.standby() == 1 && device.timelines().front().anim.state == AnimState::Stopped &&
-                      device.tree().find("/cues/count")->get().front().number() == 1.0;
-    if (!cued) std::fprintf(stderr, "OSCQlock: GO by OSC did not fire the cue\n");
+    // The sequence (NyxMap's), by OSC: GO plays the first step (a timeline plays), which follows: the second stops it
+    Sequencer::Sequence cueList = device.sequencer().sequence(0);
+    Sequencer::Step intro, out;
+    intro.description = QStringLiteral("Intro");
+    intro.timeline = first;
+    intro.action = AnimAction::Play;
+    intro.postWait = 0.1;
+    intro.next = Sequencer::StepContinue::AutoFollow;
+    out.description = QStringLiteral("Blackout");
+    out.timeline = first;
+    out.action = AnimAction::Stop;
+    cueList.steps = {intro, out};
+    device.control(first, AnimAction::Stop);
+    device.sequencer().setSequence(0, cueList);
+    bool cued = device.tree().apply("/sequence/go", {}) == 1 && device.timelines().front().anim.state == AnimState::Playing &&
+                device.tree().find("/sequence/steps")->get().front().number() == 2.0;
+    {
+        QEventLoop wait; // the device's clock moves the follow on
+        QTimer::singleShot(500, &wait, &QEventLoop::quit);
+        wait.exec();
+    }
+    cued = cued && device.timelines().front().anim.state == AnimState::Stopped && device.sequencer().position() == 1 &&
+           device.tree().find("/sequence/position")->get().front().number() == 2.0;
+    if (!cued) std::fprintf(stderr, "OSCQlock: GO by OSC did not play the sequence\n");
 
     // A show saved and opened again: the same timelines, the same cues, the tracks driving the same devices
     QTemporaryDir dir;
@@ -182,18 +198,21 @@ int selfTest()
     bool shown = show::save(file, device, destinations, &why);
     device.addTimeline(QStringLiteral("not in the show"));
     shown = shown && show::open(file, device, destinations, &why) && device.timelines().size() == timelines &&
-            device.timelines().front().anim.tracks.size() == tracks && device.cues().size() == 1 && device.cues().front().name == QLatin1String("Blackout") &&
+            device.timelines().front().anim.tracks.size() == tracks && device.sequencer().sequence(0).steps.size() == 2 &&
+            device.sequencer().sequence(0).steps[1].description == QLatin1String("Blackout") &&
             device.timelines().front().anim.tracks[1].layer == destinations.all().back()->id;
-    // Opened, it is not modified; playing does not modify it; a cue edited does
+    // Opened, it is not modified; playing does not modify it; a step edited does
     shown = shown && !device.modified();
     device.control(first, AnimAction::Play);
     shown = shown && !device.modified();
-    device.setCues({});
+    Sequencer::Sequence shorter = device.sequencer().sequence(0);
+    shorter.steps.pop_back();
+    device.sequencer().setSequence(0, shorter);
     shown = shown && device.modified();
     if (!shown) std::fprintf(stderr, "OSCQlock: a show saved and opened again is not the same, or not told modified as it should (%s)\n", qPrintable(why));
 
 
-    // Undo: a timeline removed comes back at its place with its tracks and its nodes; a cue list edited goes back and forth
+    // Undo: a timeline removed comes back at its place with its tracks and its nodes; a sequence edited goes back and forth
     QUndoStack history;
     const Animation second = device.timelines()[1].anim;
     history.push(new cmd::TimelineThere(&device, second, 1, false));
@@ -201,15 +220,17 @@ int selfTest()
     history.undo();
     undone = undone && device.timeline(second.id) && device.timelines()[1].anim.id == second.id &&
              device.timelines()[1].anim.tracks.size() == second.tracks.size() && device.tree().find("/generator/timeline2/transport/play");
-    const std::vector<Device::Cue> noCues = device.cues();
-    Device::Cue one;
-    one.name = QStringLiteral("One");
-    history.push(new cmd::SetCues(&device, noCues, {one}, QStringLiteral("New Cue")));
-    undone = undone && device.cues().size() == 1;
+    const Sequencer::Sequence was = device.sequencer().sequence(0);
+    Sequencer::Sequence more = was;
+    Sequencer::Step one;
+    one.description = QStringLiteral("One");
+    more.steps.push_back(one);
+    history.push(new cmd::SetSequence(&device, 0, was, more, QStringLiteral("New Step")));
+    undone = undone && device.sequencer().sequence(0).steps.size() == was.steps.size() + 1;
     history.undo();
-    undone = undone && device.cues().size() == noCues.size();
+    undone = undone && device.sequencer().sequence(0).steps.size() == was.steps.size();
     history.redo();
-    undone = undone && device.cues().size() == 1 && device.cues().front().name == QLatin1String("One");
+    undone = undone && device.sequencer().sequence(0).steps.back().description == QLatin1String("One");
     if (!undone) std::fprintf(stderr, "OSCQlock: an undo did not put things back\n");
 
     device.tree().removeObserver(watching);
@@ -313,16 +334,13 @@ int main(int argc, char **argv)
         auto *openButton = new QPushButton(QStringLiteral("Open…"));
         auto *saveButton = new QPushButton(QStringLiteral("Save"));
         auto *saveAsButton = new QPushButton(QStringLiteral("Save as…"));
-        openButton->setToolTip(QStringLiteral("Open a show (.oscqlock): its timelines, its cues, its devices"));
+        openButton->setToolTip(QStringLiteral("Open a show (.oscqlock): its timelines, its sequence, its devices"));
         saveButton->setToolTip(QStringLiteral("Save the show in its file (Cmd/Ctrl+S)"));
         saveButton->setShortcut(QKeySequence::Save);
         openButton->setShortcut(QKeySequence::Open);
-        auto *undoButton = new QPushButton(QStringLiteral("↶"));
-        auto *redoButton = new QPushButton(QStringLiteral("↷"));
-        for (QPushButton *b : {undoButton, redoButton}) {
-            b->setFixedWidth(34);
-            b->setEnabled(false);
-        }
+        auto *undoButton = new QPushButton(QStringLiteral("Undo"));
+        auto *redoButton = new QPushButton(QStringLiteral("Redo"));
+        for (QPushButton *b : {undoButton, redoButton}) b->setEnabled(false);
         header->addWidget(undoButton);
         header->addWidget(redoButton);
         header->addSpacing(8);
@@ -343,11 +361,11 @@ int main(int argc, char **argv)
         header->addSpacing(14);
         left->addLayout(header);
 
-        // Undo / redo: what is edited in the window (timelines, cues), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
+        // Undo / redo: what is edited in the window (timelines, the sequence), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
         auto *undo = new QUndoStack(&window);
         auto *generator = new GeneratorPage(&device, undo);
-        auto *cues = new CuesPage(&device, undo);
-        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"cues", cues}});
+        auto *sequence = new SequencePage(&device, undo);
+        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"sequence", sequence}});
         controls->setMinimumSize(640, 380);
         controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         left->addWidget(controls, 1);

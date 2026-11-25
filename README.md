@@ -9,7 +9,7 @@ No release yet.
 On a **Mac**, unzip, move OSCQlock to Applications and Control-click › Open the first time (it is signed ad hoc, not notarized). On **Windows**, run the installer. On **Linux** and the **Raspberry Pi** (4 and 5, 64-bit), make the AppImage executable and run it (or unpack the tar.gz).
 
 **A show sequencer for OSC and OSCQuery.** Timelines (curves, waves, filters) that drive the devices of the network, played by a cue list
-with a GO button, by hand or by OSC: lights, video, sound, anything that takes OSC. OSCQuery devices are found on the network and their
+with a GO button (NyxMap's sequencer, shared through pxs-qt), by hand or by OSC: lights, video, sound, anything that takes OSC. OSCQuery devices are found on the network and their
 parameters listed, nothing to type; plain OSC devices are declared once. OSCQlock is an OSCQuery device itself, so a controller (Companion,
 QLab, OSCQontrol on a phone…) drives it like anything else.
 
@@ -33,11 +33,11 @@ parameter tree and the dark look of the Pixel Stereo applications.
 
 ## The window and the namespace
 
-The window can be resized. **Open…**, **Save**, **Save as…** keep a show in a file (`.oscqlock`: its timelines, its cues, the devices it
+The window can be resized. **Open…**, **Save**, **Save as…** keep a show in a file (`.oscqlock`: its timelines, its sequence, the devices it
 drives); what is done is also kept between launches. `--show file` opens one at start, with or without a window (`--no-window`).
 
 Everything is a node of OSCQlock's own tree, so a controller drives it as it drives anything else. The tab is `/ui/tab` (`generator`,
-`cues`), with the actions `/ui/tab/next` and `/ui/tab/previous`.
+`sequence`), with the actions `/ui/tab/next` and `/ui/tab/previous`.
 
 | Tab | Under | What |
 |---|---|---|
@@ -46,11 +46,11 @@ Everything is a node of OSCQlock's own tree, so a controller drives it as it dri
 | | `/generator/new`, `new_named`, `remove` | actions: a timeline more (`N`, or named: `s`), shown; a timeline removed by its slug (`s`). `last_action` (`s`): a signal, the last action received |
 | | `/generator/<slug>` | one timeline: `name` (text); `transport/play` (on: plays, off: pauses), `stop`, `rewind`, `seek` (`f`, in the pass); `timeline/duration` (s, of a pass), `loop` (`once loop pingpong`), `passes` (0: endless), `speed`, `passes_done` (only read); `remove` |
 | | `/generator/<slug>/tracks`, `signals` | signals: `tracks/1`, `2`… what each track says now, after its filters (`f`); `signals/cycle` (a pass starts) and `done` (`N`), `progress` (`f`, in the pass), `seconds` (`d`, played) |
-| **Cues** | the cue list | a cue: a name, a **wait** after GO, what it **does** (start a timeline from its beginning, play, pause, stop it, or stop all) and whether GO **goes on to the next** one by itself (cues fired together, each after its own wait). **GO** (space bar) fires the cue on standby and moves the standby on; **Back**; **Stop all** (Escape); a double-click on a cue's number puts it on standby |
-| | `/cues/go`, `back`, `stop_all` | actions (`N`), as the buttons |
-| | `/cues/fire` | `i`: fires the cue of that number now, the standby does not move |
-| | `/cues/standby`, `next`, `count` | the number of the cue on standby (`i`, written: another one), its name and how many cues (only read) |
-| | `/cues/fired` | a signal (`s`): the name of a cue that acts, after its wait |
+| **Sequence** | the cue list | NyxMap's sequencer (pxs-qt's `pxs::sequence`): a step has a text, a **pre-wait** after its GO, what it **does** to a timeline (play, pause, stop, rewind, seek, loop mode, speed), a **post-wait**, and **then**: wait for GO, or **auto follow** (the next step gets its GO once this one's action, the time its timeline plays, and its post-wait are over). **GO** (space bar) plays the step on standby (red), **GO BACK** the one before, **Stop** stops the waits, **Stop all** (Escape) the waits and every timeline; a double-click on a step's number plays it |
+| | `/sequence/go`, `back`, `stop`, `stop_all` | actions (`N`), as the buttons |
+| | `/sequence/step` | `i`: plays the step of that number |
+| | `/sequence/position`, `next`, `steps` | the number of the step played (0: none), the text of the one GO plays, how many steps (only read) |
+| | `/sequence/played` | a signal (`s`): the text of a step that was played |
 
 ## Devices: where the tracks send
 
@@ -59,8 +59,8 @@ their namespace is read, and a track can drive any number of them that can be wr
 not announced is added by its address (**+ OSCQuery…**, `host:port`). A **plain OSC** device is made here (**+ OSC**): a name, a host, a
 UDP port, and the addresses it takes, each with its type (a number `f`, a whole number `i`, on / off `T`/`F`) and its range. In a track,
 the button above its settings chooses what it drives: OSCQlock's own output, or a device and one of its numbers. A value is sent when it
-changes, after the track's filters. The OSC devices, the OSCQuery ones added by hand, the timelines and the cues are kept between launches, and in a show file.
+changes, after the track's filters. The OSC devices, the OSCQuery ones added by hand, the timelines and the sequence are kept between launches, and in a show file.
 
-`--screenshot file.png` saves a picture of the window and exits (`--tab cues`: that tab; `--tab devices`: the Devices window).
+`--screenshot file.png` saves a picture of the window and exits (`--tab sequence`: that tab; `--tab devices`: the Devices window).
 
 Every numeric parameter says its range and default (a reset is writing `DEFAULT_VALUE`); the tree is checked at start (`Tree::check()`), and `--check` fails when it lacks something.

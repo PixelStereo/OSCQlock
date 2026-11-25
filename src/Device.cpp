@@ -94,9 +94,9 @@ void Device::said(const std::string &path, const ValueList &args)
     m_tree.fire("/generator/last_action", {Value(text)});
 }
 
-Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent)
+Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent), m_sequencer(*this, m_lock, this)
 {
-    m_tabs = {"generator", "cues"};
+    m_tabs = {"generator", "sequence"};
     if (m_persistent) {
         m_saveTimer.setSingleShot(true);
         m_saveTimer.setInterval(400);
@@ -104,7 +104,7 @@ Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent
         load();
     }
     buildGenerator();
-    buildCues();
+    buildSequence();
     buildUi();
     m_clock.start();
     connect(&m_timer, &QTimer::timeout, this, [this] { tick(); });
@@ -551,140 +551,107 @@ double Device::filtered(const Timeline &t, size_t index, double raw, double dt)
     return state.processor.step(state.config, dt).value_or(raw);
 }
 
-// ---- the cue list
+// ---- the cue list: NyxMap's sequencer, the Device its host
 
-QStringList Device::cueActionNames()
+void Device::buildSequence()
 {
-    return {QStringLiteral("Start"), QStringLiteral("Play"), QStringLiteral("Pause"), QStringLiteral("Stop"), QStringLiteral("Stop all")};
-}
-
-void Device::buildCues()
-{
-    group("/cues", "Cues", "The cue list: GO fires the cue on standby (after its wait), and the next one too when it continues by itself");
-    action("/cues/go", "N", "GO", "Fires the cue on standby, then the next one is", [this](const ValueList &) {
-        go();
+    if (m_sequencer.count() == 0) {
+        Sequencer::Sequence first;
+        first.name = QStringLiteral("Sequence 1");
+        m_sequencer.add(first);
+    }
+    if (m_sequencer.current() < 0) m_sequencer.setCurrent(0);
+    group("/sequence", "Sequence", "The cue list (NyxMap's): GO plays the next step, after its pre-wait; a step that follows gives the next one its GO");
+    action("/sequence/go", "N", "GO", "Plays the step on standby", [this](const ValueList &) { return m_sequencer.go(); });
+    action("/sequence/back", "N", "GO BACK", "Plays the step before, at once", [this](const ValueList &) { return m_sequencer.back(); });
+    action("/sequence/stop", "N", "Stop", "The waits and follows of the sequence stopped (the timelines go on)", [this](const ValueList &) {
+        m_sequencer.stop();
         return true;
     });
-    action("/cues/back", "N", "Back", "The cue before is on standby", [this](const ValueList &) {
-        back();
-        return true;
-    });
-    action("/cues/stop_all", "N", "Stop all", "Every timeline stopped, and the cues that wait to act forgotten", [this](const ValueList &) {
+    action("/sequence/stop_all", "N", "Stop all", "Every wait and follow stopped, and every timeline", [this](const ValueList &) {
         stopAll();
         return true;
     });
-    action("/cues/fire", "i", "Fire", "Fires the cue of that number (1: the first), now: the standby does not move", [this](const ValueList &v) {
-        return fire(int(v.at(0).number().value_or(0.0)) - 1);
+    action("/sequence/step", "i", "Step", "Plays the step of that number (1: the first)", [this](const ValueList &v) {
+        return m_sequencer.goTo(int(v.at(0).number().value_or(0.0)) - 1);
     });
-    auto standby = std::make_unique<CoreParameter>("standby", "Standby", CoreParameter::Type::Int);
-    standby->range(1, 1000).step(1).byDefault(Value(1)).transient();
-    standby->bind([this] { return Value(m_standby + 1); }, [this](const Value &v) { setStandby(int(v.number().value_or(1.0)) - 1); });
-    m_declared.push_back("/cues/standby");
-    m_tree.add("/cues/standby", std::move(standby)).description = "The number of the cue GO fires next (1: the first; past the last: none)";
-    auto next = std::make_unique<CoreParameter>("next", "Next", CoreParameter::Type::Text);
-    next->readOnly().bind([this] { return Value(m_standby < int(m_cues.size()) ? m_cues[size_t(m_standby)].name.toStdString() : std::string()); },
-                          [](const Value &) {});
-    m_declared.push_back("/cues/next");
-    m_tree.add("/cues/next", std::move(next)).description = "The name of the cue on standby (empty: none)";
-    auto count = std::make_unique<CoreParameter>("count", "Cues", CoreParameter::Type::Int);
-    count->readOnly().range(0, 1000).bind([this] { return Value(int(m_cues.size())); }, [](const Value &) {});
-    m_declared.push_back("/cues/count");
-    m_tree.add("/cues/count", std::move(count));
-    signal("/cues/fired", "s", "Fired", "s: the name of a cue that acts (after its wait)");
+    const auto readOnly = [this](const char *path, const char *label, CoreParameter::Type type, std::function<Value()> get, const char *description) {
+        auto p = std::make_unique<CoreParameter>(std::string(path).substr(std::string(path).rfind('/') + 1), label, type);
+        p->readOnly().bind(std::move(get), [](const Value &) {});
+        if (type == CoreParameter::Type::Int) p->range(0, 10000);
+        m_declared.push_back(path);
+        m_tree.add(path, std::move(p)).description = description;
+    };
+    readOnly("/sequence/position", "Played", CoreParameter::Type::Int, [this] { return Value(m_sequencer.position() + 1); },
+             "The number of the step played last (0: none yet)");
+    readOnly("/sequence/next", "Next", CoreParameter::Type::Text, [this] {
+        const int n = m_sequencer.next();
+        const Sequencer::Sequence s = m_sequencer.sequence(std::max(0, m_sequencer.current()));
+        return Value(n >= 0 && n < int(s.steps.size()) ? s.steps[size_t(n)].description.toStdString() : std::string());
+    }, "The step GO plays (its text; empty: none)");
+    readOnly("/sequence/steps", "Steps", CoreParameter::Type::Int, [this] {
+        return Value(int(m_sequencer.sequence(std::max(0, m_sequencer.current())).steps.size()));
+    }, "How many steps");
+    signal("/sequence/played", "s", "Played", "s: the text of a step that was played");
+    connect(&m_sequencer, &Sequencer::positionChanged, this, [this] {
+        sequenceChanged();
+        const Sequencer::Sequence s = m_sequencer.sequence(std::max(0, m_sequencer.current()));
+        const int at = m_sequencer.position();
+        if (at >= 0 && at < int(s.steps.size())) m_tree.fire("/sequence/played", {Value(s.steps[size_t(at)].description.toStdString())});
+    });
+    connect(&m_sequencer, &Sequencer::changed, this, [this] {
+        sequenceChanged();
+        save();
+    });
 }
 
-void Device::cuesChanged()
+void Device::sequenceChanged()
 {
-    m_tree.changed("/cues/standby");
-    m_tree.changed("/cues/next");
-    m_tree.changed("/cues/count");
-    if (m_cuesChanged) m_cuesChanged();
-}
-
-void Device::setCues(const std::vector<Cue> &cues)
-{
-    m_cues = cues;
-    for (Cue &c : m_cues)
-        if (!c.id) c.id = m_nextCue++;
-    m_standby = std::clamp(m_standby, 0, int(m_cues.size()));
-    cuesChanged();
-    save();
-}
-
-void Device::setStandby(int index)
-{
-    index = std::clamp(index, 0, int(m_cues.size()));
-    if (index == m_standby) return;
-    m_standby = index;
-    cuesChanged();
-}
-
-bool Device::fire(int index)
-{
-    if (index < 0 || index >= int(m_cues.size())) return false;
-    const Cue &c = m_cues[size_t(index)];
-    if (c.wait <= 0) act(c);
-    else m_pending.emplace_back(c.wait, c);
-    return true;
-}
-
-void Device::go()
-{
-    // The cue on standby, and the ones after it that continue from it
-    while (m_standby < int(m_cues.size())) {
-        const int at = m_standby++;
-        fire(at);
-        if (!m_cues[size_t(at)].autoContinue) break;
-    }
-    cuesChanged();
-}
-
-void Device::back()
-{
-    setStandby(m_standby - 1);
+    m_tree.changed("/sequence/position");
+    m_tree.changed("/sequence/next");
+    m_tree.changed("/sequence/steps");
 }
 
 void Device::stopAll()
 {
-    m_pending.clear();
+    m_sequencer.stopAll();
     for (Timeline &t : m_timelines)
         if (t.anim.state != AnimState::Stopped) control(t.anim.id, AnimAction::Stop);
-    if (m_cuesChanged) m_cuesChanged();
 }
 
-void Device::act(const Cue &cue)
+void Device::controlAnimation(quint64 id, AnimAction action, double value, AnimLoop loop, int repeat)
 {
-    switch (cue.action) {
-    case CueAction::StopAll:
-        for (Timeline &t : m_timelines) control(t.anim.id, AnimAction::Stop);
-        break;
-    case CueAction::Start:
-        control(cue.timeline, AnimAction::Rewind);
-        control(cue.timeline, AnimAction::Play);
-        break;
-    case CueAction::Play: control(cue.timeline, AnimAction::Play); break;
-    case CueAction::Pause: control(cue.timeline, AnimAction::Pause); break;
-    case CueAction::Stop: control(cue.timeline, AnimAction::Stop); break;
+    Timeline *t = find(id);
+    if (!t) return;
+    if (action == AnimAction::LoopMode) {
+        const Said before = said(*t);
+        t->anim.setLoop(loop, repeat);
+        tell(*t, before);
+        return;
     }
-    m_fired = cue.name.toStdString();
-    m_tree.fire("/cues/fired", {Value(m_fired)});
-    if (m_cuesChanged) m_cuesChanged();
+    control(id, action, value);
 }
 
-void Device::stepCues(double dt)
+// What Play plays, in seconds: its passes from where it is (0: endless, nothing to wait for; infinity: frozen, speed 0)
+double Device::animationPlayTime(quint64 id) const
 {
-    if (m_pending.empty()) return;
-    std::vector<Cue> due;
-    for (auto it = m_pending.begin(); it != m_pending.end();) {
-        it->first -= dt;
-        if (it->first <= 0) {
-            due.push_back(it->second);
-            it = m_pending.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (const Cue &c : due) act(c);
+    const Timeline *t = timeline(id);
+    if (!t) return 0;
+    const double length = t->anim.length();
+    if (!std::isfinite(length)) return 0;
+    if (t->anim.speed <= 1e-9) return std::numeric_limits<double>::infinity();
+    return (t->anim.state == AnimState::Stopped ? length : std::max(0.0, length - t->anim.clock)) / t->anim.speed;
+}
+
+// What a timeline told to play still plays: 0 once over (or stopped, gone, endless), infinity while it does not move
+double Device::animationRemaining(quint64 id) const
+{
+    const Timeline *t = timeline(id);
+    if (!t) return 0;
+    const double length = t->anim.length();
+    if (t->anim.state == AnimState::Stopped || !std::isfinite(length)) return 0;
+    if (t->anim.state == AnimState::Paused || t->anim.speed <= 1e-9) return std::numeric_limits<double>::infinity();
+    return std::max(0.0, length - t->anim.clock) / t->anim.speed;
 }
 
 // ---- a show, and what is kept between launches: the timelines (their transport, their tracks and what each drives) and the cues
@@ -707,19 +674,6 @@ QJsonArray Device::timelinesJson() const
         o["tracks"] = tracks;
         list.append(o);
     }
-    return list;
-}
-
-QJsonArray Device::cuesJson() const
-{
-    QJsonArray list;
-    for (const Cue &c : m_cues)
-        list.append(QJsonObject{{"id", double(c.id)},
-                                {"name", c.name},
-                                {"wait", c.wait},
-                                {"timeline", double(c.timeline)},
-                                {"action", cueActionNames().value(int(c.action)).toLower().replace(' ', '_')},
-                                {"continue", c.autoContinue}});
     return list;
 }
 
@@ -748,31 +702,52 @@ void Device::readTimelines(const QJsonArray &list)
     }
 }
 
-void Device::readCues(const QJsonArray &list)
+void Device::readSequence(const QJsonObject &o)
 {
-    m_cues.clear();
-    const QStringList actions = cueActionNames();
-    for (const QJsonValue &v : list) {
-        const QJsonObject o = v.toObject();
-        Cue c;
-        c.id = quint64(o.value("id").toDouble());
-        if (!c.id) c.id = m_nextCue;
-        m_nextCue = std::max(m_nextCue, c.id + 1);
-        c.name = o.value("name").toString();
-        c.wait = std::max(0.0, o.value("wait").toDouble());
-        c.timeline = quint64(o.value("timeline").toDouble());
-        const QString action = o.value("action").toString();
-        for (int i = 0; i < actions.size(); ++i)
-            if (actions[i].toLower().replace(' ', '_') == action) c.action = CueAction(i);
-        c.autoContinue = o.value("continue").toBool();
-        m_cues.push_back(c);
+    if (o.value("sequences").isArray()) {
+        m_sequencer.fromJson(o.value("sequences").toArray(), std::max(0, o.value("sequence").toInt()));
+    } else {
+        // An OSCQlock before NyxMap's sequencer kept "cues": each one a step (start: rewind then play; stop all: every timeline stopped)
+        m_sequencer.clear();
+        Sequencer::Sequence seq;
+        seq.name = QStringLiteral("Sequence 1");
+        for (const QJsonValue &v : o.value("cues").toArray()) {
+            const QJsonObject c = v.toObject();
+            Sequencer::Step st;
+            st.description = c.value("name").toString();
+            st.preWait = std::max(0.0, c.value("wait").toDouble());
+            st.next = c.value("continue").toBool() ? Sequencer::StepContinue::AutoFollow : Sequencer::StepContinue::Wait;
+            const quint64 timeline = quint64(c.value("timeline").toDouble());
+            const QString action = c.value("action").toString();
+            const auto act = [](quint64 id, AnimAction a) {
+                Sequencer::Step x;
+                x.timeline = id;
+                x.action = a;
+                return x;
+            };
+            if (action == QLatin1String("start")) st.actions = {act(timeline, AnimAction::Rewind), act(timeline, AnimAction::Play)};
+            else if (action == QLatin1String("stop_all"))
+                for (const Timeline &t : m_timelines) st.actions.push_back(act(t.anim.id, AnimAction::Stop));
+            else {
+                st.timeline = timeline;
+                st.action = action == QLatin1String("pause") ? AnimAction::Pause : action == QLatin1String("stop") ? AnimAction::Stop : AnimAction::Play;
+            }
+            seq.steps.push_back(st);
+        }
+        m_sequencer.add(seq);
     }
-    m_standby = 0;
+    if (m_sequencer.count() == 0) {
+        Sequencer::Sequence first;
+        first.name = QStringLiteral("Sequence 1");
+        m_sequencer.add(first);
+    }
+    m_sequencer.setCurrent(std::clamp(m_sequencer.current(), 0, m_sequencer.count() - 1));
 }
 
 QJsonObject Device::show() const
 {
-    return QJsonObject{{"timelines", timelinesJson()}, {"cues", cuesJson()}, {"shown", QString::fromStdString(s.shown)}};
+    return QJsonObject{{"timelines", timelinesJson()}, {"sequences", m_sequencer.toJson()}, {"sequence", m_sequencer.current()},
+                       {"shown", QString::fromStdString(s.shown)}};
 }
 
 bool Device::loadShow(const QJsonObject &show, QString *error)
@@ -784,13 +759,13 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     for (const Timeline &t : m_timelines) m_tree.remove(base(t));
     m_timelines.clear();
     m_filters.clear();
-    m_pending.clear();
+    m_sequencer.stopAll();
     readTimelines(show.value("timelines").toArray());
     if (m_timelines.empty()) addTimeline();
     s.shown = show.value("shown").toString().toStdString();
-    readCues(show.value("cues").toArray());
+    readSequence(show);
     timelinesChanged();
-    cuesChanged();
+    sequenceChanged();
     writeSettings();
     setSaved();
     return true;
@@ -803,7 +778,7 @@ QByteArray Device::snapshot() const
         for (const AnimTrack &track : t.anim.tracks)
             if (track.layer) used.push_back(track.layer);
     return QJsonDocument(QJsonObject{{"timelines", timelinesJson()},
-                                     {"cues", cuesJson()},
+                                     {"sequences", m_sequencer.toJson()},
                                      {"devices", m_destinations ? m_destinations->showJson(used) : QJsonArray()}})
         .toJson(QJsonDocument::Compact);
 }
@@ -834,7 +809,8 @@ void Device::writeSettings()
     if (!m_persistent) return;
     QSettings settings;
     settings.setValue(QStringLiteral("timelines"), QJsonDocument(timelinesJson()).toJson(QJsonDocument::Compact));
-    settings.setValue(QStringLiteral("cues"), QJsonDocument(cuesJson()).toJson(QJsonDocument::Compact));
+    settings.setValue(QStringLiteral("sequences"), QJsonDocument(m_sequencer.toJson()).toJson(QJsonDocument::Compact));
+    settings.remove(QStringLiteral("cues")); // an OSCQlock before NyxMap's sequencer: read once, then as sequences
     settings.setValue(QStringLiteral("shown"), QString::fromStdString(s.shown));
 }
 
@@ -842,7 +818,12 @@ void Device::load()
 {
     QSettings settings;
     readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array());
-    readCues(QJsonDocument::fromJson(settings.value(QStringLiteral("cues")).toByteArray()).array());
+    QJsonObject kept;
+    if (settings.contains(QStringLiteral("sequences")))
+        kept["sequences"] = QJsonDocument::fromJson(settings.value(QStringLiteral("sequences")).toByteArray()).array();
+    else
+        kept["cues"] = QJsonDocument::fromJson(settings.value(QStringLiteral("cues")).toByteArray()).array();
+    readSequence(kept);
     s.shown = settings.value(QStringLiteral("shown")).toString().toStdString();
 }
 
@@ -870,7 +851,7 @@ void Device::tick()
 {
     const double dt = m_clock.restart() / 1000.0;
     m_up += dt;
-    stepCues(dt);
+    m_sequencer.advance(dt); // its waits, on this thread (fadesManual)
     for (Timeline &t : m_timelines) {
         const std::string b = base(t);
         if (t.anim.state == AnimState::Playing) {

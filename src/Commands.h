@@ -1,6 +1,6 @@
 #pragma once
 // What the window does, as undo steps (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z): a timeline edited in the editor (a drag, the arrows of a number
-// merged into one step), a timeline made, removed or renamed, the cue list edited. What OSC writes is not undone: it is the show playing.
+// merged into one step), a timeline made, removed or renamed, the sequence edited. What OSC writes is not undone: it is the show playing.
 #include "Device.h"
 
 #include <QUndoCommand>
@@ -74,20 +74,21 @@ private:
     QString m_before, m_after;
 };
 
-// The cue list as it was edited (a cue made, removed, moved, its wait or what it does)
-class SetCues : public QUndoCommand
+// A sequence as it was edited (a step made, removed, moved, its waits or what it does)
+class SetSequence : public QUndoCommand
 {
 public:
-    SetCues(Device *device, const std::vector<Device::Cue> &before, const std::vector<Device::Cue> &after, const QString &text)
-        : QUndoCommand(text), m_device(device), m_before(before), m_after(after)
+    SetSequence(Device *device, int index, const Sequencer::Sequence &before, const Sequencer::Sequence &after, const QString &text)
+        : QUndoCommand(text), m_device(device), m_index(index), m_before(before), m_after(after)
     {
     }
-    void redo() override { m_device->setCues(m_after); }
-    void undo() override { m_device->setCues(m_before); }
+    void redo() override { m_device->sequencer().setSequence(m_index, m_after); }
+    void undo() override { m_device->sequencer().setSequence(m_index, m_before); }
 
 private:
     Device *m_device;
-    std::vector<Device::Cue> m_before, m_after;
+    int m_index;
+    Sequencer::Sequence m_before, m_after;
 };
 
 } // namespace cmd
