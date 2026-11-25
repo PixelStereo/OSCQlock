@@ -52,6 +52,7 @@ public:
     const Timeline *timeline(quint64 id) const;
     quint64 addTimeline(const QString &name = {}); // with a track of a sine on its own output; its id
     bool removeTimeline(quint64 id);               // the last one stays
+    void restoreTimeline(const Animation &timeline, int index); // one removed, back at its place (undo), with its id
     void renameTimeline(quint64 id, const QString &name);
     quint64 shown() const; // the sub-tab shown (/generator/shown)
     void show(quint64 id);

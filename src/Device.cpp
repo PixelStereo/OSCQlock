@@ -236,6 +236,20 @@ quint64 Device::addTimeline(const QString &name)
     return m_timelines.back().anim.id;
 }
 
+void Device::restoreTimeline(const Animation &timeline, int index)
+{
+    if (!timeline.id || this->timeline(timeline.id)) return;
+    Timeline t;
+    t.anim = timeline;
+    t.anim.state = AnimState::Stopped;
+    t.anim.clock = 0;
+    t.slug = slugOf(t.anim.id);
+    m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
+    const auto at = m_timelines.begin() + std::clamp(index, 0, int(m_timelines.size()));
+    buildTimeline(*m_timelines.insert(at, std::move(t)));
+    timelinesChanged();
+}
+
 bool Device::removeTimeline(quint64 id)
 {
     if (m_timelines.size() <= 1) return false;

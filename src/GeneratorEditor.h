@@ -8,12 +8,13 @@
 #include <pxs/TimelineEditor.h>
 
 class QLabel;
+class QUndoStack;
 class QTabBar;
 
 class TimelineEditor : public pxs::timelineview::AnimEditor
 {
 public:
-    TimelineEditor(Device *device, QWidget *parent = nullptr);
+    TimelineEditor(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
     ~TimelineEditor() override;
     void setTimeline(quint64 id); // the one shown
     quint64 timelineId() const { return m_id; }
@@ -36,7 +37,7 @@ private:
 class GeneratorPage : public QWidget
 {
 public:
-    GeneratorPage(Device *device, QWidget *parent = nullptr);
+    GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
     ~GeneratorPage() override;
     void tick(); // a step of the device (the window calls it)
 
@@ -44,6 +45,7 @@ private:
     void sync(); // the sub-tabs from the Device's timelines, the one shown in the editor
 
     Device *m_device;
+    QUndoStack *m_undo;
     QTabBar *m_tabs;
     QLabel *m_status;
     TimelineEditor *m_editor;

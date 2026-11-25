@@ -6,6 +6,7 @@
 #include "Destinations.h"
 #include "Device.h"
 #include "DevicesWindow.h"
+#include "Commands.h"
 #include "CuesPage.h"
 #include "GeneratorEditor.h"
 #include "Panel.h"
@@ -30,6 +31,7 @@
 #include <QPlainTextEdit>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QUndoStack>
 #include <QPushButton>
 #include <QUdpSocket>
 #include <QTimer>
@@ -190,8 +192,28 @@ int selfTest()
     shown = shown && device.modified();
     if (!shown) std::fprintf(stderr, "OSCQlock: a show saved and opened again is not the same, or not told modified as it should (%s)\n", qPrintable(why));
 
+
+    // Undo: a timeline removed comes back at its place with its tracks and its nodes; a cue list edited goes back and forth
+    QUndoStack history;
+    const Animation second = device.timelines()[1].anim;
+    history.push(new cmd::TimelineThere(&device, second, 1, false));
+    bool undone = !device.timeline(second.id) && !device.tree().find("/generator/timeline2");
+    history.undo();
+    undone = undone && device.timeline(second.id) && device.timelines()[1].anim.id == second.id &&
+             device.timelines()[1].anim.tracks.size() == second.tracks.size() && device.tree().find("/generator/timeline2/transport/play");
+    const std::vector<Device::Cue> noCues = device.cues();
+    Device::Cue one;
+    one.name = QStringLiteral("One");
+    history.push(new cmd::SetCues(&device, noCues, {one}, QStringLiteral("New Cue")));
+    undone = undone && device.cues().size() == 1;
+    history.undo();
+    undone = undone && device.cues().size() == noCues.size();
+    history.redo();
+    undone = undone && device.cues().size() == 1 && device.cues().front().name == QLatin1String("One");
+    if (!undone) std::fprintf(stderr, "OSCQlock: an undo did not put things back\n");
+
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried && cued && shown;
+    feedback = feedback && made && sent && queried && cued && shown && undone;
 
     bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
@@ -295,6 +317,15 @@ int main(int argc, char **argv)
         saveButton->setToolTip(QStringLiteral("Save the show in its file (Cmd/Ctrl+S)"));
         saveButton->setShortcut(QKeySequence::Save);
         openButton->setShortcut(QKeySequence::Open);
+        auto *undoButton = new QPushButton(QStringLiteral("↶"));
+        auto *redoButton = new QPushButton(QStringLiteral("↷"));
+        for (QPushButton *b : {undoButton, redoButton}) {
+            b->setFixedWidth(34);
+            b->setEnabled(false);
+        }
+        header->addWidget(undoButton);
+        header->addWidget(redoButton);
+        header->addSpacing(8);
         header->addWidget(showName);
         header->addWidget(openButton);
         header->addWidget(saveButton);
@@ -312,8 +343,10 @@ int main(int argc, char **argv)
         header->addSpacing(14);
         left->addLayout(header);
 
-        auto *generator = new GeneratorPage(&device);
-        auto *cues = new CuesPage(&device);
+        // Undo / redo: what is edited in the window (timelines, cues), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
+        auto *undo = new QUndoStack(&window);
+        auto *generator = new GeneratorPage(&device, undo);
+        auto *cues = new CuesPage(&device, undo);
         auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"cues", cues}});
         controls->setMinimumSize(640, 380);
         controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -354,7 +387,7 @@ int main(int argc, char **argv)
         };
         QObject::connect(saveButton, &QPushButton::clicked, &window, [saveTo, showPath] { saveTo(*showPath); });
         QObject::connect(saveAsButton, &QPushButton::clicked, &window, [saveTo] { saveTo(QString()); });
-        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title, saveTo] {
+        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title, saveTo, undo] {
             // What would be replaced and is not in a file: saved first, or let go, or nothing opened
             if (device.modified()) {
                 const auto answer = QMessageBox::question(&window, QStringLiteral("Open a show"),
@@ -376,6 +409,7 @@ int main(int argc, char **argv)
             }
             *showPath = path;
             QSettings().setValue(QStringLiteral("showPath"), path);
+            undo->clear(); // another show: what was done before is not undone in it
             title();
         });
         device.onTick([generator, title] {
@@ -383,6 +417,23 @@ int main(int argc, char **argv)
             title();
         });
         title();
+        // The undo buttons and their keys, with what they would undo or redo
+        QAction *undoAction = undo->createUndoAction(&window, QStringLiteral("Undo"));
+        QAction *redoAction = undo->createRedoAction(&window, QStringLiteral("Redo"));
+        undoAction->setShortcut(QKeySequence::Undo);
+        redoAction->setShortcut(QKeySequence::Redo);
+        window.addAction(undoAction);
+        window.addAction(redoAction);
+        QObject::connect(undoButton, &QPushButton::clicked, undoAction, &QAction::trigger);
+        QObject::connect(redoButton, &QPushButton::clicked, redoAction, &QAction::trigger);
+        QObject::connect(undoAction, &QAction::changed, undoButton, [undoButton, undoAction] {
+            undoButton->setEnabled(undoAction->isEnabled());
+            undoButton->setToolTip(undoAction->text() + QStringLiteral("  (") + QKeySequence(QKeySequence::Undo).toString(QKeySequence::NativeText) + ')');
+        });
+        QObject::connect(redoAction, &QAction::changed, redoButton, [redoButton, redoAction] {
+            redoButton->setEnabled(redoAction->isEnabled());
+            redoButton->setToolTip(redoAction->text() + QStringLiteral("  (") + QKeySequence(QKeySequence::Redo).toString(QKeySequence::NativeText) + ')');
+        });
 
         devicesWindow = new DevicesWindow(&destinations, &window);
         QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {

@@ -4,7 +4,9 @@
 // back; a double-click on a row's number puts that cue on standby. The same as /cues/go, /cues/back, /cues/stop_all, /cues/standby.
 #include <QWidget>
 
-class Device;
+#include "Device.h"
+
+class QUndoStack;
 class QLabel;
 class QPushButton;
 class QTableWidget;
@@ -12,7 +14,7 @@ class QTableWidget;
 class CuesPage : public QWidget
 {
 public:
-    explicit CuesPage(Device *device, QWidget *parent = nullptr);
+    CuesPage(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
     ~CuesPage() override;
 
 private:
@@ -21,8 +23,10 @@ private:
     void store();    // the rows, as edited, to the device
     void move(int by); // the selected cue up or down
     bool typing() const; // a cue is being edited
+    void apply(const std::vector<Device::Cue> &after, const QString &text); // an undo step
 
     Device *m_device;
+    QUndoStack *m_undo;
     QTableWidget *m_table;
     QPushButton *m_go;
     QLabel *m_next, *m_state;

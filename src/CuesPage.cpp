@@ -1,5 +1,6 @@
 #include "CuesPage.h"
 
+#include "Commands.h"
 #include "Device.h"
 
 #include <QApplication>
@@ -14,6 +15,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QTableWidget>
+#include <QUndoStack>
 #include <QVBoxLayout>
 
 namespace {
@@ -24,7 +26,7 @@ const char *kAccent = "#ff8a3d";
 
 } // namespace
 
-CuesPage::CuesPage(Device *device, QWidget *parent) : QWidget(parent), m_device(device)
+CuesPage::CuesPage(Device *device, QUndoStack *undo, QWidget *parent) : QWidget(parent), m_device(device), m_undo(undo)
 {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 8, 0, 0);
@@ -115,7 +117,7 @@ CuesPage::CuesPage(Device *device, QWidget *parent) : QWidget(parent), m_device(
         c.timeline = m_device->shown();
         const int at = m_table->currentRow() >= 0 ? m_table->currentRow() + 1 : int(cues.size());
         cues.insert(cues.begin() + at, c);
-        m_device->setCues(cues);
+        apply(cues, QStringLiteral("New Cue"));
         m_table->selectRow(at);
     });
     connect(remove, &QPushButton::clicked, this, [this] {
@@ -123,7 +125,7 @@ CuesPage::CuesPage(Device *device, QWidget *parent) : QWidget(parent), m_device(
         std::vector<Device::Cue> cues = m_device->cues();
         if (row < 0 || row >= int(cues.size())) return;
         cues.erase(cues.begin() + row);
-        m_device->setCues(cues);
+        apply(cues, QStringLiteral("Remove Cue"));
     });
     connect(up, &QPushButton::clicked, this, [this] { move(-1); });
     connect(down, &QPushButton::clicked, this, [this] { move(1); });
@@ -241,7 +243,19 @@ void CuesPage::store()
         if (auto *timeline = qobject_cast<QComboBox *>(m_table->cellWidget(row, TimelineColumn))) c.timeline = timeline->currentData().toULongLong();
         if (auto *cont = qobject_cast<QCheckBox *>(m_table->cellWidget(row, ContinueColumn))) c.autoContinue = cont->isChecked();
     }
-    m_device->setCues(cues);
+    apply(cues, QStringLiteral("Edit Cue"));
+}
+
+void CuesPage::apply(const std::vector<Device::Cue> &after, const QString &text)
+{
+    const std::vector<Device::Cue> before = m_device->cues();
+    bool same = before.size() == after.size();
+    for (size_t i = 0; same && i < before.size(); ++i)
+        same = before[i].id == after[i].id && before[i].name == after[i].name && before[i].wait == after[i].wait &&
+               before[i].timeline == after[i].timeline && before[i].action == after[i].action && before[i].autoContinue == after[i].autoContinue;
+    if (same) return; // nothing changed: no step
+    if (m_undo) m_undo->push(new cmd::SetCues(m_device, before, after, text));
+    else m_device->setCues(after);
 }
 
 void CuesPage::move(int by)
@@ -251,7 +265,7 @@ void CuesPage::move(int by)
     const int to = row + by;
     if (row < 0 || to < 0 || to >= int(cues.size())) return;
     std::swap(cues[size_t(row)], cues[size_t(to)]);
-    m_device->setCues(cues);
+    apply(cues, QStringLiteral("Move Cue"));
     rebuild();
     m_table->selectRow(to);
 }
