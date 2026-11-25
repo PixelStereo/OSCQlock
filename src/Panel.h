@@ -29,6 +29,8 @@ public:
     Panel(pxs::core::tree::Tree &tree, const std::vector<std::string> &sections, const std::vector<std::string> &order = {},
           Mode mode = Mode::Controls, QWidget *parent = nullptr);
     ~Panel() override;
+    // A widget of the application's own at the top of a tab (Controls mode): `section` is the top-level node's name
+    void addHead(const std::string &section, QWidget *widget);
 
 private:
     using Show = std::function<void(const pxs::core::ValueList &)>;
@@ -45,6 +47,7 @@ private:
     Mode m_mode;
     std::vector<std::string> m_tabs; // the tabs that were made, by name
     std::unordered_map<std::string, int> m_order;
+    std::unordered_map<std::string, QFormLayout *> m_forms; // each tab's rows, by its name
     QTabWidget *m_tabWidget = nullptr;
     int m_observer = 0;
     std::unordered_map<const pxs::core::tree::Node *, std::vector<Show>> m_show;
