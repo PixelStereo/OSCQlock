@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 
 using namespace pxs::core;
 using namespace pxs::core::tree;
+using CoreParameter = pxs::core::tree::Parameter;
 
 namespace {
 
@@ -71,10 +73,10 @@ Node &Device::group(const char *path, const char *label, const char *description
 
 // A parameter whose value lives in `ref`
 template <class T, class Configure>
-Node &Device::bound(const char *path, const char *label, Parameter::Type type, T &ref, Configure configure)
+Node &Device::bound(const char *path, const char *label, CoreParameter::Type type, T &ref, Configure configure)
 {
     const std::string full = path;
-    auto p = std::make_unique<Parameter>(full.substr(full.rfind('/') + 1), label, type);
+    auto p = std::make_unique<CoreParameter>(full.substr(full.rfind('/') + 1), label, type);
     p->byDefault(Value(ref));
     p->bind([&ref] { return Value(ref); }, [&ref](const Value &v) { assign(ref, v); });
     configure(*p);
@@ -84,10 +86,10 @@ Node &Device::bound(const char *path, const char *label, Parameter::Type type, T
 
 // A parameter that keeps its own value
 template <class Configure>
-Node &Device::stored(const char *path, const char *label, Parameter::Type type, Value initial, Configure configure)
+Node &Device::stored(const char *path, const char *label, CoreParameter::Type type, Value initial, Configure configure)
 {
     const std::string full = path;
-    auto p = std::make_unique<Parameter>(full.substr(full.rfind('/') + 1), label, type);
+    auto p = std::make_unique<CoreParameter>(full.substr(full.rfind('/') + 1), label, type);
     auto cell = std::make_shared<Value>(initial);
     p->byDefault(initial);
     p->bind([cell] { return *cell; }, [cell](const Value &v) { like(*cell, v, nullptr); });
@@ -195,59 +197,228 @@ Device::Device(QObject *parent) : QObject(parent)
 
 void Device::buildGenerator()
 {
-    group("/generator", "Generator", "A node that holds nodes: the transport, the waveform and the loops");
+    // The timeline: one pass of 4 s, in a loop, a sine of a second between 0 and 1
+    m_timeline.id = 1;
+    m_timeline.name = "Generator";
+    AnimTrack t;
+    t.param = "output";
+    t.oscillator = true;
+    t.wave = AnimWave::Sine;
+    t.period = 1;
+    t.center = 0.5;
+    t.amplitude = 0.5;
+    t.keys = {AnimKey{0, 0, 3}, AnimKey{2, 1, 3}, AnimKey{4, 0, 3}}; // what Keys starts from
+    m_timeline.tracks = {t};
 
-    group("/generator/transport", "Transport", "A parameter and actions side by side: a switch, and what moves it");
-    bound("/generator/transport/play", "Play", Parameter::Type::Bool, s.play, [](Parameter &p) { p.transient(); });
-    bound("/generator/transport/flash", "Flash", Parameter::Type::Bool, s.flash, [](Parameter &p) { p.transient(); }).description =
-        "Holds the waveform at its maximum while it is on: send true, then false";
-    action("/generator/transport/rewind", "N", "Rewind", "Back to the start of the first loop", [this](const ValueList &) {
-        s.pos = 0;
-        s.loopCount = 0;
-        m_tree.changed("/generator/loops/loop_count");
+    // A parameter read and written through two functions; whatever it changes beside itself is told
+    const auto param = [this](const char *path, const char *label, CoreParameter::Type type, std::function<Value()> get, std::function<void(const Value &)> set,
+                              std::function<void(CoreParameter &)> configure) -> Node & {
+        const std::string full = path;
+        auto p = std::make_unique<CoreParameter>(full.substr(full.rfind('/') + 1), label, type);
+        p->bind(std::move(get), [this, set = std::move(set)](const Value &v) {
+            const Said before = said();
+            set(v);
+            tell(before);
+        });
+        configure(*p);
+        m_declared.push_back(path);
+        return m_tree.add(path, std::move(p));
+    };
+    const auto doing = [this](AnimAction a, double time = 0) {
+        control(a, time);
         return true;
+    };
+
+    group("/generator", "Generator", "A timeline of one track, as NyxMap's: a wave (or keys), played over passes. The editor above edits the same");
+
+    group("/generator/transport", "Transport", "Parameters and actions side by side: where the timeline is, and what moves it");
+    param("/generator/transport/play", "Play", CoreParameter::Type::Bool, [this] { return Value(m_timeline.state == AnimState::Playing); },
+          [this](const Value &v) { m_timeline.control(v.truthy() ? AnimAction::Play : AnimAction::Pause); },
+          [](CoreParameter &p) { p.transient().byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
+    bound("/generator/transport/flash", "Flash", CoreParameter::Type::Bool, s.flash, [](CoreParameter &p) { p.transient(); }).description =
+        "Holds the output at its maximum while it is on: send true, then false";
+    action("/generator/transport/rewind", "N", "Rewind", "Back to the start of the first pass", [doing](const ValueList &) { return doing(AnimAction::Rewind); });
+    action("/generator/transport/seek", "f", "Seek", "Go to a place in the pass it is in (0 to 1)", [this, doing](const ValueList &v) {
+        const double at = std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0);
+        return doing(AnimAction::Seek, m_timeline.clockAt(at * m_timeline.passDuration()));
     });
-    action("/generator/transport/seek", "f", "Seek", "Go to a place in the loop (0 to 1)", [this](const ValueList &v) {
-        s.pos = std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0);
-        return true;
+    action("/generator/transport/jump", "i", "Jump", "Go to the start of a pass (0: the first)", [this, doing](const ValueList &v) {
+        return doing(AnimAction::Seek, std::max(0.0, v.at(0).number().value_or(0.0)) * m_timeline.passDuration());
     });
-    action("/generator/transport/jump", "i", "Jump", "Go to a loop", [this](const ValueList &v) {
-        s.loopCount = std::max(0, int(v.at(0).number().value_or(0.0)));
-        m_tree.changed("/generator/loops/loop_count");
-        return true;
-    });
-    action("/generator/transport/go_to", "if", "Go to", "Go to a loop and a place in it", [this](const ValueList &v) {
-        s.loopCount = std::max(0, int(v.at(0).number().value_or(0.0)));
-        s.pos = std::clamp(v.at(1).number().value_or(0.0), 0.0, 1.0);
-        m_tree.changed("/generator/loops/loop_count");
-        return true;
+    action("/generator/transport/go_to", "if", "Go to", "Go to a pass and a place in it (0 to 1)", [this, doing](const ValueList &v) {
+        const double d = m_timeline.passDuration();
+        return doing(AnimAction::Seek, std::max(0.0, v.at(0).number().value_or(0.0)) * d + std::clamp(v.at(1).number().value_or(0.0), 0.0, 1.0) * d);
     });
 
-    group("/generator/wave", "Waveform", "Parameters only: a choice, floats with their range, step and unit, and a text");
-    bound("/generator/wave/type", "Type", Parameter::Type::Choice, s.type,
-          [](Parameter &p) { p.choices({"sine", "saw", "triangle", "square", "random"}); });
-    bound("/generator/wave/frequency", "Frequency", Parameter::Type::Float, s.frequency,
-          [](Parameter &p) { p.range(0.05, 20).step(0.05).unit("frequency.hertz").animatable(); });
-    bound("/generator/wave/amplitude", "Amplitude", Parameter::Type::Float, s.amplitude, [](Parameter &p) { p.range(0, 1).animatable(); });
-    bound("/generator/wave/offset", "Offset", Parameter::Type::Float, s.offset, [](Parameter &p) { p.range(-1, 1).animatable(); });
-    bound("/generator/wave/shift", "Phase shift", Parameter::Type::Float, s.shift, [](Parameter &p) { p.range(0, 1).animatable(); }).description =
-        "Moves the waveform along its loop (1 is a whole loop): the shape starts later, the loop does not";
-    bound("/generator/wave/label", "Label", Parameter::Type::Text, s.label, [](Parameter &) {});
+    group("/generator/wave", "Wave", "Parameters only: the track, a wave of its own period or keys drawn over the pass");
+    param("/generator/wave/keys", "Keys", CoreParameter::Type::Bool, [this] { return Value(!track().oscillator); },
+          [this](const Value &v) { track().oscillator = !v.truthy(); },
+          [](CoreParameter &p) { p.byDefault(Value(false)); }).description = "Off: the wave below. On: the keys drawn in the editor, over the pass";
+    param("/generator/wave/type", "Wave", CoreParameter::Type::Choice, [this] { return Value(animWaveKeys().at(int(track().wave)).toStdString()); },
+          [this](const Value &v) {
+              const int k = int(animWaveKeys().indexOf(QString::fromStdString(v.text())));
+              if (k >= 0) track().wave = AnimWave(k);
+          },
+          [](CoreParameter &p) {
+              std::vector<std::string> keys;
+              for (const QString &k : animWaveKeys()) keys.push_back(k.toStdString());
+              p.choices(keys).byDefault(Value("sine"));
+          });
+    param("/generator/wave/frequency", "Frequency", CoreParameter::Type::Float, [this] { return Value(1.0 / std::max(0.01, track().period)); },
+          [this](const Value &v) { track().period = 1.0 / std::clamp(v.number().value_or(1.0), 0.05, 20.0); },
+          [](CoreParameter &p) { p.range(0.05, 20).step(0.05).unit("frequency.hertz").byDefault(Value(1.0)).animatable(); }).description =
+        "Periods a second (the wave's period is its inverse)";
+    param("/generator/wave/amplitude", "Amplitude", CoreParameter::Type::Float, [this] { return Value(track().amplitude); },
+          [this](const Value &v) { track().amplitude = v.number().value_or(0.5); },
+          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.5)).animatable(); }).description = "How far it goes from its center, each way";
+    param("/generator/wave/center", "Center", CoreParameter::Type::Float, [this] { return Value(track().center); },
+          [this](const Value &v) { track().center = v.number().value_or(0.5); },
+          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.5)).animatable(); }).description = "What it goes around";
+    param("/generator/wave/phase", "Phase", CoreParameter::Type::Float, [this] { return Value(track().phase); },
+          [this](const Value &v) { track().phase = v.number().value_or(0.0); },
+          [](CoreParameter &p) { p.range(0, 1).byDefault(Value(0.0)).animatable(); }).description =
+        "Where the wave starts in its period (1 is a whole period)";
+    bound("/generator/wave/label", "Label", CoreParameter::Type::Text, s.label, [](CoreParameter &) {});
 
-    group("/generator/loops", "Loops", "Whole numbers: any within limits, one among a few, and a state that is only read");
-    bound("/generator/loops/loops", "Loops (0: endless)", Parameter::Type::Int, s.loops, [](Parameter &p) { p.range(0, 100).step(1); });
-    bound("/generator/loops/steps", "Steps", Parameter::Type::Int, s.steps, [](Parameter &p) { p.values({1, 2, 4, 8, 16}); }).description =
-        "Cuts the waveform into a stair of 8 x steps levels (1: smooth). A whole number that can only be one of a few";
-    bound("/generator/loops/loop_count", "Loops done", Parameter::Type::Int, s.loopCount, [](Parameter &p) { p.readOnly().range(0, 100000); });
+    group("/generator/timeline", "Timeline", "The passes: how long one is, how they follow one another, how many, how fast");
+    param("/generator/timeline/duration", "Duration", CoreParameter::Type::Float, [this] { return Value(m_timeline.duration); },
+          [this](const Value &v) { m_timeline.duration = std::clamp(v.number().value_or(4.0), pxs::core::timeline::Transport::kMinDuration, 3600.0); },
+          [](CoreParameter &p) { p.range(0.05, 60).limits(0.05, 3600).step(0.05).unit("time.second").byDefault(Value(4.0)); }).description =
+        "Seconds of one pass (what the keys are drawn over)";
+    param("/generator/timeline/loop", "Loop", CoreParameter::Type::Choice, [this] { return Value(animLoopKey(m_timeline.loop).toStdString()); },
+          [this](const Value &v) { m_timeline.setLoop(animLoopFromKey(QString::fromStdString(v.text())), m_timeline.repeat); },
+          [](CoreParameter &p) { p.choices({"once", "loop", "pingpong"}).byDefault(Value("loop")); }).description =
+        "Once, in a loop, or back and forth";
+    param("/generator/timeline/passes", "Passes (0: endless)", CoreParameter::Type::Int, [this] { return Value(m_timeline.repeat); },
+          [this](const Value &v) { m_timeline.setLoop(m_timeline.loop, int(v.number().value_or(0.0))); },
+          [](CoreParameter &p) { p.range(0, 100).step(1).byDefault(Value(0)); });
+    param("/generator/timeline/speed", "Speed", CoreParameter::Type::Float, [this] { return Value(m_timeline.speed); },
+          [this](const Value &v) { m_timeline.control(AnimAction::Speed, v.number().value_or(1.0)); },
+          [](CoreParameter &p) { p.range(0, 10).step(0.01).byDefault(Value(1.0)); }).description = "0: frozen where it is";
+    bound("/generator/timeline/passes_done", "Passes done", CoreParameter::Type::Int, s.passesDone, [](CoreParameter &p) { p.readOnly().range(0, 100000); });
 
-    group("/generator/signals", "Signals", "Signals only: what the generator emits, nobody writes them. The waveform is a signal that holds others");
+    group("/generator/signals", "Signals", "Signals only: what the generator emits, nobody writes them. The output is a signal that holds others");
     signal("/generator/signals/last_action", "s", "Last action", "The last action received, with its address and arguments");
-    signal("/generator/signals/wave", "f", "Waveform", "The waveform, 50 times a second", {range(-1, 2)});
-    signal("/generator/signals/wave/cycle", "N", "Cycle", "N: a loop starts (an impulse, no value)");
-    signal("/generator/signals/wave/done", "N", "Done", "N: the loops asked for are done");
-    signal("/generator/signals/wave/above", "T", "Above half", "T: the waveform crossed 0.5");
-    signal("/generator/signals/wave/phase", "f", "Phase", "f: where it is in the loop", {range(0, 1)});
-    signal("/generator/signals/wave/seconds", "d", "Seconds", "d: seconds since it started playing");
+    signal("/generator/signals/wave", "f", "Output", "The track's value, 50 times a second", {range(-1, 2)});
+    signal("/generator/signals/wave/cycle", "N", "Pass", "N: a pass starts (an impulse, no value)");
+    signal("/generator/signals/wave/done", "N", "Done", "N: the passes asked for are done");
+    signal("/generator/signals/wave/above", "T", "Above center", "T: the output crossed its center");
+    signal("/generator/signals/wave/phase", "f", "Progress", "f: where it is in the pass (0 to 1)", {range(0, 1)});
+    signal("/generator/signals/wave/seconds", "d", "Played", "d: seconds played, across the passes");
+}
+
+// ---- the timeline: the editor's, the transport
+
+Device::Said Device::said() const
+{
+    Said d;
+    d.play = m_timeline.state == AnimState::Playing;
+    d.keys = !track().oscillator;
+    d.wave = int(track().wave);
+    d.frequency = 1.0 / std::max(0.01, track().period);
+    d.amplitude = track().amplitude;
+    d.center = track().center;
+    d.phase = track().phase;
+    d.duration = m_timeline.duration;
+    d.loop = int(m_timeline.loop);
+    d.repeat = m_timeline.repeat;
+    d.speed = m_timeline.speed;
+    d.passesDone = passesDone();
+    return d;
+}
+
+void Device::tell(const Said &before)
+{
+    const Said now = said();
+    s.passesDone = now.passesDone;
+    const auto told = [this](bool differs, const char *path) {
+        if (differs) m_tree.changed(path);
+    };
+    told(before.play != now.play, "/generator/transport/play");
+    told(before.keys != now.keys, "/generator/wave/keys");
+    told(before.wave != now.wave, "/generator/wave/type");
+    told(before.frequency != now.frequency, "/generator/wave/frequency");
+    told(before.amplitude != now.amplitude, "/generator/wave/amplitude");
+    told(before.center != now.center, "/generator/wave/center");
+    told(before.phase != now.phase, "/generator/wave/phase");
+    told(before.duration != now.duration, "/generator/timeline/duration");
+    told(before.loop != now.loop, "/generator/timeline/loop");
+    told(before.repeat != now.repeat, "/generator/timeline/passes");
+    told(before.speed != now.speed, "/generator/timeline/speed");
+    told(before.passesDone != now.passesDone, "/generator/timeline/passes_done");
+}
+
+int Device::passesDone() const
+{
+    if (m_timeline.state == AnimState::Stopped && m_timeline.clock <= 0) return 0;
+    return int(std::floor(std::min(m_timeline.clock, m_timeline.length()) / m_timeline.passDuration() + 1e-9));
+}
+
+void Device::setTimeline(const Animation &edited)
+{
+    const Said before = said();
+    // What it is comes from the editor, where it is stays (as NyxMap keeps a timeline that is edited while it plays)
+    Animation next = edited;
+    next.id = m_timeline.id;
+    next.state = m_timeline.state;
+    next.clock = m_timeline.clock;
+    next.oscillatorOffset = m_timeline.oscillatorOffset;
+    next.reversed = m_timeline.reversed;
+    next.loop = m_timeline.loop;
+    next.repeat = m_timeline.repeat;
+    next.setLoop(edited.loop, edited.repeat);
+    if (next.tracks.empty()) next.tracks = m_timeline.tracks; // the generator always has its track
+    next.tracks.resize(1);
+    sortAnimKeys(next.tracks.front());
+    m_timeline = next;
+    tell(before);
+}
+
+void Device::control(AnimAction action, double time)
+{
+    const Said before = said();
+    m_timeline.control(action, time);
+    tell(before);
+}
+
+AnimationPlayback Device::playback() const
+{
+    AnimationPlayback p;
+    p.id = m_timeline.id;
+    p.name = m_timeline.name;
+    p.state = m_timeline.state;
+    p.loop = m_timeline.loop;
+    p.position = m_timeline.position();
+    p.duration = m_timeline.duration;
+    p.clock = m_timeline.clock;
+    p.played = m_timeline.played();
+    p.speed = m_timeline.speed;
+    p.length = m_timeline.length();
+    p.backwards = m_timeline.backwardsAt(m_timeline.clock);
+    p.tracks = 1;
+    p.pass = m_timeline.pass();
+    p.captured = {std::numeric_limits<double>::quiet_NaN()};
+    return p;
+}
+
+std::vector<::ParamInfo> Device::animatableParams(quint64) const
+{
+    ::ParamInfo p;
+    p.path = "output";
+    p.label = "Generator › Output";
+    p.min = 0;
+    p.max = 1;
+    p.lo = -1;
+    p.hi = 2;
+    p.animatable = true;
+    return {p};
+}
+
+bool Device::animParamValue(quint64, const QString &path, double *value) const
+{
+    if (path != "output") return false;
+    *value = s.value;
+    return true;
 }
 
 // ---- /values: a parameter that holds its components
@@ -265,8 +436,8 @@ void Device::buildValues()
         s.y = float(std::clamp(v[1].number().value_or(s.y), 0.0, 1.0));
         return true;
     };
-    bound("/values/position/x", "X", Parameter::Type::Float, s.x, [](Parameter &p) { p.range(0, 1).animatable().pointComponent(0); });
-    bound("/values/position/y", "Y", Parameter::Type::Float, s.y, [](Parameter &p) { p.range(0, 1).animatable().pointComponent(1); });
+    bound("/values/position/x", "X", CoreParameter::Type::Float, s.x, [](CoreParameter &p) { p.range(0, 1).animatable().pointComponent(0); });
+    bound("/values/position/y", "Y", CoreParameter::Type::Float, s.y, [](CoreParameter &p) { p.range(0, 1).animatable().pointComponent(1); });
     relate("/values/position", {"/values/position/x", "/values/position/y"});
 
     Node &color = raw("/values/color", "fff", "Color", "A colour: a value (fff) that holds r, g and b, a switch and an action", {range(0, 1), range(0, 1), range(0, 1)},
@@ -279,10 +450,10 @@ void Device::buildValues()
         s.b = float(std::clamp(v[2].number().value_or(s.b), 0.0, 1.0));
         return true;
     };
-    bound("/values/color/r", "Red", Parameter::Type::Float, s.r, [](Parameter &p) { p.range(0, 1).animatable().colorComponent(0); });
-    bound("/values/color/g", "Green", Parameter::Type::Float, s.g, [](Parameter &p) { p.range(0, 1).animatable().colorComponent(1); });
-    bound("/values/color/b", "Blue", Parameter::Type::Float, s.b, [](Parameter &p) { p.range(0, 1).animatable().colorComponent(2); });
-    bound("/values/color/enable", "Enabled", Parameter::Type::Bool, s.tint, [](Parameter &p) { p.transient(); });
+    bound("/values/color/r", "Red", CoreParameter::Type::Float, s.r, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(0); });
+    bound("/values/color/g", "Green", CoreParameter::Type::Float, s.g, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(1); });
+    bound("/values/color/b", "Blue", CoreParameter::Type::Float, s.b, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(2); });
+    bound("/values/color/enable", "Enabled", CoreParameter::Type::Bool, s.tint, [](CoreParameter &p) { p.transient(); });
     relate("/values/color", {"/values/color/r", "/values/color/g", "/values/color/b"});
     action("/values/color/set", "fff", "Set the color", "An action under a value: sets the three components", [this](const ValueList &v) {
         s.r = float(std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0));
@@ -304,13 +475,13 @@ void Device::buildValues()
 void Device::buildTypes()
 {
     group("/types", "Types", "One parameter of each kind OSC and OSCQuery have: the widget that edits it is the one for its type");
-    stored("/types/switch", "Switch", Parameter::Type::Bool, Value(false), [](Parameter &) {}).description = "T / F: on or off";
-    stored("/types/int", "Whole number", Parameter::Type::Int, Value(0), [](Parameter &p) { p.range(-100, 100).step(1); }).description = "i: within -100 and 100";
-    stored("/types/int_among", "One among a few", Parameter::Type::Int, Value(4), [](Parameter &p) { p.values({1, 2, 4, 8, 16}); }).description = "i: only 1 2 4 8 16";
-    stored("/types/choice", "Choice", Parameter::Type::Choice, Value("two"), [](Parameter &p) { p.choices({"one", "two", "three"}); }).description = "s: one key among a list";
-    stored("/types/float", "Float", Parameter::Type::Float, Value(0.5), [](Parameter &p) { p.range(0, 1).step(0.01).animatable(); }).description = "f: within 0 and 1";
-    stored("/types/wide", "Wide float", Parameter::Type::Float, Value(0.0), [](Parameter &p) { p.range(-1000, 1000).step(0.1); }).description = "f: within -1000 and 1000, typed rather than dragged";
-    stored("/types/text", "Text", Parameter::Type::Text, Value("hello"), [](Parameter &) {}).description = "s: a string";
+    stored("/types/switch", "Switch", CoreParameter::Type::Bool, Value(false), [](CoreParameter &) {}).description = "T / F: on or off";
+    stored("/types/int", "Whole number", CoreParameter::Type::Int, Value(0), [](CoreParameter &p) { p.range(-100, 100).step(1); }).description = "i: within -100 and 100";
+    stored("/types/int_among", "One among a few", CoreParameter::Type::Int, Value(4), [](CoreParameter &p) { p.values({1, 2, 4, 8, 16}); }).description = "i: only 1 2 4 8 16";
+    stored("/types/choice", "Choice", CoreParameter::Type::Choice, Value("two"), [](CoreParameter &p) { p.choices({"one", "two", "three"}); }).description = "s: one key among a list";
+    stored("/types/float", "Float", CoreParameter::Type::Float, Value(0.5), [](CoreParameter &p) { p.range(0, 1).step(0.01).animatable(); }).description = "f: within 0 and 1";
+    stored("/types/wide", "Wide float", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(-1000, 1000).step(0.1); }).description = "f: within -1000 and 1000, typed rather than dragged";
+    stored("/types/text", "Text", CoreParameter::Type::Text, Value("hello"), [](CoreParameter &) {}).description = "s: a string";
     raw("/types/double", "d", "Double", "d: a double", {range(-10, 10)}, {Value(3.141592653589793)});
     raw("/types/int64", "h", "64-bit number", "h: a 64-bit whole number", {range(0, 9e15)}, {Value(std::int64_t(1234567890123))});
     raw("/types/blob", "b", "Blob", "b: bytes (shown in hexadecimal)", {ArgRange{}}, {Value(Blob{0xde, 0xad, 0xbe, 0xef})});
@@ -335,7 +506,7 @@ void Device::buildActions()
     action("/actions/mixed", "sfT", "Mixed", "sfT: a text, a number and a switch", nullptr);
 
     // A parameter that holds actions
-    bound("/actions/counter", "Counter", Parameter::Type::Int, s.counter, [](Parameter &p) { p.range(0, 1000).step(1); }).description =
+    bound("/actions/counter", "Counter", CoreParameter::Type::Int, s.counter, [](CoreParameter &p) { p.range(0, 1000).step(1); }).description =
         "A parameter that holds actions: they move it";
     action("/actions/counter/increment", "N", "Increment", "+1", [this](const ValueList &) {
         s.counter = std::min(1000, s.counter + 1);
@@ -373,23 +544,23 @@ void Device::buildSignals()
 void Device::buildAccess()
 {
     group("/access", "Access", "Who can read and who can write: what a controller may do with each");
-    bound("/access/read_only", "Read only", Parameter::Type::Int, s.uptime, [](Parameter &p) { p.readOnly().range(0, 1000000); }).description =
+    bound("/access/read_only", "Read only", CoreParameter::Type::Int, s.uptime, [](CoreParameter &p) { p.readOnly().range(0, 1000000); }).description =
         "Seconds the device has been running: it can be read, a write is refused";
-    stored("/access/write_only", "Write only", Parameter::Type::Text, Value(""), [](Parameter &p) { p.writeOnly(); }).description =
+    stored("/access/write_only", "Write only", CoreParameter::Type::Text, Value(""), [](CoreParameter &p) { p.writeOnly(); }).description =
         "It can be written and not read (no VALUE, no feedback)";
-    stored("/access/locked", "Locked", Parameter::Type::Float, Value(0.5), [](Parameter &p) { p.range(0, 1); }).description =
+    stored("/access/locked", "Locked", CoreParameter::Type::Float, Value(0.5), [](CoreParameter &p) { p.range(0, 1); }).description =
         "Locked by the device: every write is refused";
     m_tree.setLocked("/access/locked", true);
-    stored("/access/transient", "Never saved", Parameter::Type::Bool, Value(false), [](Parameter &p) { p.transient(); }).description =
+    stored("/access/transient", "Never saved", CoreParameter::Type::Bool, Value(false), [](CoreParameter &p) { p.transient(); }).description =
         "A state of the show, not saved with the rest";
-    stored("/access/critical", "Critical", Parameter::Type::Float, Value(0.0), [](Parameter &p) { p.range(0, 1); }).critical = true;
+    stored("/access/critical", "Critical", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(0, 1); }).critical = true;
     m_tree.find("/access/critical")->description = "A write to it must not be lost (CRITICAL)";
-    Node &tagged = stored("/access/tagged", "Tagged", Parameter::Type::Text, Value("tags"), [](Parameter &) {});
+    Node &tagged = stored("/access/tagged", "Tagged", CoreParameter::Type::Text, Value("tags"), [](CoreParameter &) {});
     tagged.description = "Tags to search by, and an attribute of its own (note)";
     tagged.tags = {"demo", "text"};
     tagged.attributes["note"] = [] { return std::optional<std::string>("\"an attribute of the device, not of OSCQuery\""); };
 
-    auto trigger = std::make_unique<Parameter>("trigger", "Trigger", Parameter::Type::Trigger);
+    auto trigger = std::make_unique<CoreParameter>("trigger", "Trigger", CoreParameter::Type::Trigger);
     trigger->bind(nullptr, [this](const Value &) { said("/access/trigger", {}); });
     m_tree.add("/access/trigger", std::move(trigger)).description = "A parameter that is an action without a value";
 }
@@ -404,11 +575,11 @@ void Device::buildStructure()
     group("/structure/a/b", "B", "");
     group("/structure/a/b/c", "C", "");
     group("/structure/a/b/c/d", "D", "");
-    stored("/structure/a/b/c/d/leaf", "Leaf", Parameter::Type::Bool, Value(false), [](Parameter &) {}).description = "The only parameter at the bottom";
-    stored("/structure/a/b/sibling", "Sibling", Parameter::Type::Int, Value(0), [](Parameter &p) { p.range(0, 10).step(1); }).description =
+    stored("/structure/a/b/c/d/leaf", "Leaf", CoreParameter::Type::Bool, Value(false), [](CoreParameter &) {}).description = "The only parameter at the bottom";
+    stored("/structure/a/b/sibling", "Sibling", CoreParameter::Type::Int, Value(0), [](CoreParameter &p) { p.range(0, 10).step(1); }).description =
         "Beside the node C, in B";
     group("/structure/mixed", "Mixed", "A parameter, an action and a signal side by side: each is a different kind of leaf");
-    stored("/structure/mixed/value", "Value", Parameter::Type::Float, Value(0.0), [](Parameter &p) { p.range(0, 1); }).description = "A parameter";
+    stored("/structure/mixed/value", "Value", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(0, 1); }).description = "A parameter";
     action("/structure/mixed/hit", "N", "Hit", "An action: it fires the pulse", [this](const ValueList &) {
         m_tree.fire("/structure/mixed/pulse");
         return true;
@@ -421,7 +592,7 @@ void Device::buildStructure()
 void Device::buildUi()
 {
     group("/ui", "Interface", "What the window shows: the tab and the drawer of the signals are parameters like the others, and move by OSC");
-    bound("/ui/tab", "Tab", Parameter::Type::Choice, s.tab, [this](Parameter &p) { p.choices(m_tabs); }).description =
+    bound("/ui/tab", "Tab", CoreParameter::Type::Choice, s.tab, [this](CoreParameter &p) { p.choices(m_tabs); }).description =
         "The tab of the window (the name of a top-level node). A parameter that holds actions";
     auto move = [this](int by) {
         const auto at = std::find(m_tabs.begin(), m_tabs.end(), s.tab);
@@ -430,27 +601,13 @@ void Device::buildUi()
         m_tree.changed("/ui/tab");
         return true;
     };
-    bound("/ui/signals", "Signals drawer", Parameter::Type::Bool, s.drawer, [](Parameter &p) { p.transient(); }).description =
+    bound("/ui/signals", "Signals drawer", CoreParameter::Type::Bool, s.drawer, [](CoreParameter &p) { p.transient(); }).description =
         "The drawer that shows the signals: open or closed";
     action("/ui/tab/next", "N", "Next tab", "The tab after, round", [move](const ValueList &) { return move(1); });
     action("/ui/tab/previous", "N", "Previous tab", "The tab before, round", [move](const ValueList &) { return move(-1); });
 }
 
 // ---- the generator itself
-
-double Device::wave(double phase)
-{
-    phase -= std::floor(phase);
-    const std::string &t = s.type;
-    double v;
-    if (t == "saw") v = phase;
-    else if (t == "triangle") v = phase < 0.5 ? phase * 2 : 2 - phase * 2;
-    else if (t == "square") v = phase < 0.5 ? 1 : 0;
-    else if (t == "random") v = std::uniform_real_distribution<double>(0, 1)(m_rng);
-    else v = 0.5 + 0.5 * std::sin(kTau * phase);
-    if (s.steps > 1 && t != "random") v = std::round(v * (s.steps * 8)) / (s.steps * 8); // the steps: a stair, finer when it is more
-    return std::clamp(s.offset + s.amplitude * v, -1.0, 2.0);
-}
 
 void Device::tick()
 {
@@ -460,38 +617,38 @@ void Device::tick()
         s.uptime = int(m_up);
         m_tree.changed("/access/read_only");
     }
-    if (s.play) {
-        s.seconds += dt;
-        s.pos += s.frequency * dt;
-        if (s.pos >= 1.0) {
-            s.pos -= std::floor(s.pos);
-            ++s.loopCount;
+    if (m_timeline.state == AnimState::Playing) {
+        const Said before = said();
+        const int pass = m_timeline.pass();
+        const bool more = m_timeline.advance(dt);
+        if (m_timeline.pass() != pass) { // a new pass
             m_tree.fire("/generator/signals/wave/cycle");
             m_tree.fire("/structure/mixed/pulse");
-            const std::string text = "loop " + std::to_string(s.loopCount);
+            const std::string text = "pass " + std::to_string(m_timeline.pass());
             m_tree.fire("/signals/text", {Value(text)});
             m_tree.fire("/signals/text/length", {Value(int(text.size()))});
-            m_tree.changed("/generator/loops/loop_count");
-            if (s.loops > 0 && s.loopCount >= s.loops) {
-                s.play = false;
-                m_tree.changed("/generator/transport/play");
-                m_tree.fire("/generator/signals/wave/done");
-            }
         }
+        if (!more) { // its passes are done: it stops where it ends, its last value held
+            m_timeline.state = AnimState::Stopped;
+            m_tree.fire("/generator/signals/wave/done");
+        }
+        tell(before);
     }
-    s.value = s.flash ? 1.0 : wave(s.pos + s.shift);
+    const double v = track().valueAt(m_timeline.position(), m_timeline.played());
+    s.value = s.flash ? track().center + track().amplitude : std::isfinite(v) ? v : track().center;
     m_tree.fire("/generator/signals/wave", {Value(s.value)});
-    m_tree.fire("/generator/signals/wave/phase", {Value(s.pos)});
-    m_tree.fire("/generator/signals/wave/seconds", {Value(s.seconds)});
+    m_tree.fire("/generator/signals/wave/phase", {Value(m_timeline.progress())});
+    m_tree.fire("/generator/signals/wave/seconds", {Value(m_timeline.played())});
     m_tree.fire("/signals/xy", {Value(float(std::clamp(s.value, 0.0, 1.0))), Value(float(std::clamp(1 - s.value, 0.0, 1.0)))});
     m_tree.fire("/signals/rgb", {Value(float(std::clamp(s.value * s.r, 0.0, 1.0))), Value(float(std::clamp(s.value * s.g, 0.0, 1.0))),
                                       Value(float(std::clamp(s.value * s.b, 0.0, 1.0)))});
     m_tree.fire("/signals/stamp", {Value(std::int64_t(QDateTime::currentMSecsSinceEpoch()))});
     const std::uint8_t level = std::uint8_t(std::clamp(s.value, 0.0, 1.0) * 255);
     m_tree.fire("/signals/digest", {Value(Blob{level, std::uint8_t(255 - level), level, std::uint8_t(255 - level)})});
-    const bool above = s.value > 0.5;
+    const bool above = s.value > track().center;
     if (above != s.above) {
         s.above = above;
         m_tree.fire("/generator/signals/wave/above", {Value(above)});
     }
+    if (m_ticked) m_ticked();
 }

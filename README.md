@@ -38,10 +38,11 @@ the actions `/ui/tab/next` and `/ui/tab/previous`, and `/ui/signals` (`T`: the d
 
 | Tab | Under | The case it is for |
 |---|---|---|
-| **Generator** | `/generator/transport` | parameters (`play`, `flash`) and actions side by side: `rewind`, `seek` (`f`), `jump` (`i`), `go_to` (`if`) |
-| | `/generator/wave` | parameters only: `type` (a choice), `frequency` (Hz, a step), `amplitude`, `offset`, `shift` (moves the waveform along its loop), `label` (text) |
-| | `/generator/loops` | whole numbers: `loops` (any within limits), `steps` (one among `1 2 4 8 16`: the waveform is cut into 8 x steps levels), `loop_count` (only read) |
-| | `/generator/signals` | signals only (in the drawer): `last_action`, and `wave` (`f`) that holds `cycle` and `done` (impulses, `N`), `above` (`T`), `phase` (`f`), `seconds` (`d`) |
+| **Generator** | the editor | the generator is a **timeline** of one track, NyxMap's (pxs-core's logic, pxs-qt's editor): a wave or keys, the duration of a pass, the loop, the transport. The editor and the parameters below edit the same timeline: each change is told to the tree (OSC feedback) |
+| | `/generator/transport` | parameters and actions side by side: `play` (on: plays, off: pauses), `flash`; `rewind`, `seek` (`f`, in the pass), `jump` (`i`, a pass), `go_to` (`if`) |
+| | `/generator/wave` | parameters only: `keys` (the keys drawn in the editor instead of the wave), `type` (`sine triangle saw square random smooth_random`), `frequency` (Hz), `amplitude`, `center`, `phase`, `label` (text) |
+| | `/generator/timeline` | `duration` (s, of a pass), `loop` (`once loop pingpong`), `passes` (0: endless), `speed`, `passes_done` (only read) |
+| | `/generator/signals` | signals only (in the drawer): `last_action`, and `wave`, the output (`f`), that holds `cycle` (a pass starts) and `done` (impulses, `N`), `above` (`T`), `phase` (progress in the pass), `seconds` (`d`, played) |
 | **Values** | `/values/position` | a value (`ff`) that holds its components `x` and `y`: writing one says it to the other |
 | | `/values/color` | a colour (`fff`) that holds `r` `g` `b`, a switch `enable` and an action `set`; its widget is the colour picker |
 | | `/values/rgba`, `origin` | a colour with alpha (`ffff`) and three plain numbers (`fff`), neither with components |

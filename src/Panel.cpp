@@ -263,6 +263,7 @@ Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::ve
             QFormLayout *form = nullptr;
             QScrollArea *scroll = pageOf(form);
             fill(form, *node);
+            m_forms[name] = form;
             m_tabWidget->addTab(scroll, fromStd(node->displayLabel()));
             m_tabs.push_back(name);
         }
@@ -287,6 +288,12 @@ Panel::Panel(Tree &tree, const std::vector<std::string> &sections, const std::ve
         if (found == m_show.end()) return;
         for (const Show &show : found->second) show(values);
     });
+}
+
+void Panel::addHead(const std::string &section, QWidget *widget)
+{
+    const auto found = m_forms.find(section);
+    if (found != m_forms.end()) found->second->insertRow(0, widget);
 }
 
 Panel::~Panel()

@@ -5,6 +5,7 @@
 // Run it, then explore it:  curl http://127.0.0.1:5678/   (or find "OSCQlock" on the network from any OSCQuery client).
 #include "Device.h"
 #include "Drawer.h"
+#include "GeneratorEditor.h"
 #include "Panel.h"
 
 #include <pxs/OscService.h>
@@ -116,7 +117,8 @@ int main(int argc, char **argv)
         title->setTextInteractionFlags(Qt::TextSelectableByMouse);
         left->addWidget(title);
         auto *controls = new Panel(device.tree(), device.tabs(), device.declared());
-        controls->setFixedSize(700, 580);
+        controls->addHead("generator", new GeneratorEditor(&device));
+        controls->setFixedSize(820, 640);
         left->addWidget(controls);
         auto *received = new QLabel("OSC received");
         received->setObjectName("caption");
