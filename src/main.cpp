@@ -6,9 +6,10 @@
 #include "Destinations.h"
 #include "Device.h"
 #include "DevicesWindow.h"
-#include "Drawer.h"
+#include "CuesPage.h"
 #include "GeneratorEditor.h"
 #include "Panel.h"
+#include "Show.h"
 
 #include <pxs/OscService.h>
 #include <pxs/Theme.h>
@@ -23,7 +24,12 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QPushButton>
 #include <QUdpSocket>
 #include <QTimer>
@@ -118,7 +124,7 @@ int selfTest()
     if (!sent) std::fprintf(stderr, "OSCQlock: a track did not reach its OSC device through its filter (received %g)\n", received);
 
     // A track that drives an OSCQuery device: OSCQlock itself, added by its address (its namespace read, then written over OSC). A number
-    // and a switch of its own tree take what the tracks say
+    // and a switch of its own tree take what the tracks say: the speed of the second timeline, and its play
     const quint64 query = destinations.addOscQuery(QStringLiteral("127.0.0.1"), service.httpPort());
     {
         QEventLoop wait;
@@ -131,9 +137,9 @@ int selfTest()
     Animation driving = device.timelines().front().anim;
     AnimTrack number, onOff;
     number.layer = onOff.layer = query;
-    number.param = QStringLiteral("/types/float");
+    number.param = QStringLiteral("/generator/timeline2/timeline/speed");
     number.keys = {AnimKey{0, 0.25, 0}};
-    onOff.param = QStringLiteral("/types/switch");
+    onOff.param = QStringLiteral("/generator/timeline2/transport/play");
     onOff.keys = {AnimKey{0, 1, 0}};
     driving.tracks.push_back(number);
     driving.tracks.push_back(onOff);
@@ -146,18 +152,40 @@ int selfTest()
         QEventLoop wait;
         QTimer poll;
         QObject::connect(&poll, &QTimer::timeout, &wait, [&] {
-            if (std::abs(value("/types/float").number().value_or(-1) - 0.25) < 1e-4 && value("/types/switch").truthy()) wait.quit();
+            if (std::abs(value("/generator/timeline2/timeline/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/generator/timeline2/transport/play").truthy()) wait.quit();
         });
         poll.start(20);
         QTimer::singleShot(5000, &wait, &QEventLoop::quit);
         wait.exec();
     }
     const bool queried = destinations.find(query)->online && !destinations.params(query).empty() &&
-                         std::abs(value("/types/float").number().value_or(-1) - 0.25) < 1e-4 && value("/types/switch").truthy();
+                         std::abs(value("/generator/timeline2/timeline/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/generator/timeline2/transport/play").truthy();
     if (!queried) std::fprintf(stderr, "OSCQlock: a track did not reach its OSCQuery device (float %g, switch %d)\n",
-                               value("/types/float").number().value_or(-1), int(value("/types/switch").truthy()));
+                               value("/generator/timeline2/timeline/speed").number().value_or(-1), int(value("/generator/timeline2/transport/play").truthy()));
+
+    // The cue list, by OSC: a cue that stops every timeline, GO fires it and the standby moves on
+    Device::Cue stopping;
+    stopping.name = QStringLiteral("Blackout");
+    stopping.action = Device::CueAction::StopAll;
+    device.setCues({stopping});
+    const bool cued = device.tree().apply("/cues/go", {}) == 1 && device.standby() == 1 && device.timelines().front().anim.state == AnimState::Stopped &&
+                      device.tree().find("/cues/count")->get().front().number() == 1.0;
+    if (!cued) std::fprintf(stderr, "OSCQlock: GO by OSC did not fire the cue\n");
+
+    // A show saved and opened again: the same timelines, the same cues, the tracks driving the same devices
+    QTemporaryDir dir;
+    const QString file = dir.filePath(QStringLiteral("check.oscqlock"));
+    QString why;
+    const size_t timelines = device.timelines().size(), tracks = device.timelines().front().anim.tracks.size();
+    bool shown = show::save(file, device, destinations, &why);
+    device.addTimeline(QStringLiteral("not in the show"));
+    shown = shown && show::open(file, device, destinations, &why) && device.timelines().size() == timelines &&
+            device.timelines().front().anim.tracks.size() == tracks && device.cues().size() == 1 && device.cues().front().name == QLatin1String("Blackout") &&
+            device.timelines().front().anim.tracks[1].layer == destinations.all().back()->id;
+    if (!shown) std::fprintf(stderr, "OSCQlock: a show saved and opened again is not the same (%s)\n", qPrintable(why));
+
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried;
+    feedback = feedback && made && sent && queried && cued && shown;
 
     bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
@@ -193,8 +221,9 @@ int main(int argc, char **argv)
     QCommandLineOption headless("no-window", "No window: only the device.");
     QCommandLineOption check("check", "Start, check the tree and the OSCQuery server, and exit (no window).");
     QCommandLineOption screenshot("screenshot", "Save a picture of the window (PNG) once it is shown, and exit. With --tab, the tab it shows.", "file");
+    QCommandLineOption showOption("show", "The show (.oscqlock) to open at start (also headless: a show box).", "file");
     QCommandLineOption tabOption("tab", "The tab the window opens on (generator, values, types…; devices: the Devices window too).", "name");
-    cli.addOptions({name, oscPort, httpPort, local, headless, check, screenshot, tabOption});
+    cli.addOptions({name, oscPort, httpPort, local, headless, check, screenshot, showOption, tabOption});
     cli.process(app);
 
     const bool keep = !cli.isSet(screenshot); // a picture taken changes nothing that is kept
@@ -210,17 +239,23 @@ int main(int argc, char **argv)
     Destinations destinations(cli.value(name), service.httpPort(), keep);
     device.setDestinations(&destinations);
     if (!cli.isSet(local)) destinations.startDiscovery();
+    if (cli.isSet(showOption)) {
+        QString why;
+        if (show::open(cli.value(showOption), device, destinations, &why)) {
+            if (keep) QSettings().setValue(QStringLiteral("showPath"), QFileInfo(cli.value(showOption)).absoluteFilePath());
+        } else {
+            qWarning("OSCQlock: the show could not be opened: %s", qPrintable(why));
+        }
+    }
 
     QWidget window;
     QPlainTextEdit *log = new QPlainTextEdit;
-    Drawer *drawer = nullptr;
     DevicesWindow *devicesWindow = nullptr;
-    int observed = 0;
     if (!cli.isSet(headless)) {
         window.setWindowTitle("OSCQlock");
         window.setMinimumSize(760, 520);
         auto *root = new QHBoxLayout(&window);
-        root->setContentsMargins(14, 10, 0, 10);
+        root->setContentsMargins(14, 10, 14, 10);
         root->setSpacing(0);
 
         // The controls: a header (the name, where it is reached, the devices), the tabs, what OSC brought
@@ -243,6 +278,21 @@ int main(int argc, char **argv)
         header->addWidget(pill(QStringLiteral("OSCQuery  http://127.0.0.1:%1/").arg(service.httpPort()), QStringLiteral("Its namespace, over HTTP and WebSocket")));
         header->addWidget(pill(QStringLiteral("OSC  udp %1").arg(service.oscPort()), QStringLiteral("What it takes over OSC")));
         header->addStretch(1);
+        // The show: its file, opened and saved (what is done is kept between launches anyway)
+        auto *showName = new QLabel;
+        showName->setStyleSheet(QStringLiteral("color: #c8ccd4; font-size: 12px;"));
+        auto *openButton = new QPushButton(QStringLiteral("Open…"));
+        auto *saveButton = new QPushButton(QStringLiteral("Save"));
+        auto *saveAsButton = new QPushButton(QStringLiteral("Save as…"));
+        openButton->setToolTip(QStringLiteral("Open a show (.oscqlock): its timelines, its cues, its devices"));
+        saveButton->setToolTip(QStringLiteral("Save the show in its file (Cmd/Ctrl+S)"));
+        saveButton->setShortcut(QKeySequence::Save);
+        openButton->setShortcut(QKeySequence::Open);
+        header->addWidget(showName);
+        header->addWidget(openButton);
+        header->addWidget(saveButton);
+        header->addWidget(saveAsButton);
+        header->addSpacing(10);
         auto *devicesButton = new QPushButton;
         devicesButton->setObjectName(QStringLiteral("accent"));
         devicesButton->setToolTip(QStringLiteral("The devices the tracks can drive: OSCQuery found on the network, plain OSC made here"));
@@ -256,7 +306,8 @@ int main(int argc, char **argv)
         left->addLayout(header);
 
         auto *generator = new GeneratorPage(&device);
-        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}});
+        auto *cues = new CuesPage(&device);
+        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"cues", cues}});
         controls->setMinimumSize(640, 380);
         controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         left->addWidget(controls, 1);
@@ -269,30 +320,51 @@ int main(int argc, char **argv)
         left->addWidget(log);
         root->addLayout(left, 1);
 
-        // The signals, in a drawer of their own: the window grows by it when it opens, and gives it back when it closes
-        auto *signalsPanel = new Panel(device.tree(), device.topLevel(), device.declared(), Panel::Mode::Signals);
-        constexpr int drawerWidth = 380;
-        drawer = new Drawer(signalsPanel, drawerWidth, "The signals the device emits");
-        root->addWidget(drawer);
-        const auto fit = [&window](bool open) {
-            if (window.isMaximized() || window.isFullScreen()) return;
-            window.resize(window.width() + (open ? drawerWidth : -drawerWidth), window.height());
+        // The file of the show: its name in the header and in the title, • while it is not saved
+        auto showPath = std::make_shared<QString>(cli.isSet(showOption) ? QFileInfo(cli.value(showOption)).absoluteFilePath()
+                                                                        : QSettings().value(QStringLiteral("showPath")).toString());
+        const auto title = [&window, showName, showPath, &device] {
+            const QString n = showPath->isEmpty() ? QStringLiteral("Untitled show") : QFileInfo(*showPath).completeBaseName();
+            const QString mark = device.modified() ? QStringLiteral("  •") : QString();
+            showName->setText(n + mark);
+            window.setWindowTitle(QStringLiteral("OSCQlock — %1%2").arg(n, mark));
         };
-        // The drawer is the node "/ui/signals": the handle writes it, and a write to it (OSC) moves the drawer
-        const pxs::core::tree::Node *drawerNode = device.tree().find("/ui/signals");
-        drawer->onToggled([&device, fit](bool open) {
-            fit(open);
-            device.tree().apply("/ui/signals", {Value(open)});
+        const auto saveTo = [&window, &device, &destinations, showPath, title](QString path) {
+            if (path.isEmpty())
+                path = QFileDialog::getSaveFileName(&window, QStringLiteral("Save the show"), *showPath,
+                                                    QStringLiteral("OSCQlock show (*.%1)").arg(show::kSuffix));
+            if (path.isEmpty()) return;
+            if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".") + show::kSuffix;
+            QString why;
+            if (!show::save(path, device, destinations, &why)) {
+                QMessageBox::warning(&window, QStringLiteral("Save"), QStringLiteral("The show could not be saved: %1").arg(why));
+                return;
+            }
+            *showPath = path;
+            QSettings().setValue(QStringLiteral("showPath"), path);
+            device.setSaved();
+            title();
+        };
+        QObject::connect(saveButton, &QPushButton::clicked, &window, [saveTo, showPath] { saveTo(*showPath); });
+        QObject::connect(saveAsButton, &QPushButton::clicked, &window, [saveTo] { saveTo(QString()); });
+        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title] {
+            const QString path = QFileDialog::getOpenFileName(&window, QStringLiteral("Open a show"), *showPath,
+                                                              QStringLiteral("OSCQlock show (*.%1)").arg(show::kSuffix));
+            if (path.isEmpty()) return;
+            QString why;
+            if (!show::open(path, device, destinations, &why)) {
+                QMessageBox::warning(&window, QStringLiteral("Open"), QStringLiteral("The show could not be opened: %1").arg(why));
+                return;
+            }
+            *showPath = path;
+            QSettings().setValue(QStringLiteral("showPath"), path);
+            title();
         });
-        if (drawerNode) {
-            observed = device.tree().addObserver([drawer, drawerNode, fit](const pxs::core::tree::Node &node, const ValueList &v) {
-                if (&node == drawerNode && !v.empty() && v.front().truthy() != drawer->isOpen()) {
-                    fit(v.front().truthy());
-                    drawer->setOpen(v.front().truthy());
-                }
-            });
-            if (drawerNode->get) drawer->setOpen(drawerNode->get().front().truthy(), false);
-        }
+        device.onTick([generator, title] {
+            generator->tick();
+            title();
+        });
+        title();
 
         devicesWindow = new DevicesWindow(&destinations, &window);
         QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {
@@ -318,6 +390,5 @@ int main(int argc, char **argv)
     });
 
     const int result = app.exec();
-    if (observed) device.tree().removeObserver(observed);
     return result;
 }

@@ -36,33 +36,6 @@ void assign(int &target, const Value &v) { target = int(v.number().value_or(targ
 void assign(bool &target, const Value &v) { target = v.truthy(); }
 void assign(std::string &target, const Value &v) { target = v.text(); }
 
-// A value of the kind the old one is, within the range (OSC says the type of a node once: what is stored keeps it)
-bool like(Value &held, const Value &incoming, const ArgRange *limits)
-{
-    if (held.is<Blob>()) {
-        if (!incoming.is<Blob>()) return false;
-        held = incoming;
-        return true;
-    }
-    if (held.is<std::string>()) {
-        held = Value(incoming.text());
-        return true;
-    }
-    if (held.is<bool>()) {
-        held = Value(incoming.truthy());
-        return true;
-    }
-    std::optional<double> n = incoming.number();
-    if (!n) return false;
-    if (limits && limits->min && limits->max)
-        n = std::clamp(*n, limits->min->number().value_or(*n), limits->max->number().value_or(*n));
-    if (held.is<int>()) held = Value(int(*n));
-    else if (held.is<std::int64_t>()) held = Value(std::int64_t(*n));
-    else if (held.is<float>()) held = Value(float(*n));
-    else held = Value(*n);
-    return true;
-}
-
 std::size_t arity(const std::string &type) { return type == "N" ? 0 : type.size(); }
 
 } // namespace
@@ -87,47 +60,6 @@ Node &Device::bound(const char *path, const char *label, CoreParameter::Type typ
     configure(*p);
     m_declared.push_back(path);
     return m_tree.add(path, std::move(p));
-}
-
-// A parameter that keeps its own value
-template <class Configure>
-Node &Device::stored(const char *path, const char *label, CoreParameter::Type type, Value initial, Configure configure)
-{
-    const std::string full = path;
-    auto p = std::make_unique<CoreParameter>(full.substr(full.rfind('/') + 1), label, type);
-    auto cell = std::make_shared<Value>(initial);
-    p->byDefault(initial);
-    p->bind([cell] { return *cell; }, [cell](const Value &v) { like(*cell, v, nullptr); });
-    configure(*p);
-    m_declared.push_back(path);
-    return m_tree.add(path, std::move(p));
-}
-
-// A node of several arguments (or of a type no Parameter says), with its range and the defaults a reset writes
-Node &Device::raw(const char *path, const char *type, const char *label, const char *description, std::vector<ArgRange> ranges, ValueList initial,
-                  std::vector<std::string> extendedType)
-{
-    m_declared.push_back(path);
-    Node &n = m_tree.add(path);
-    n.type = type;
-    n.access = 3;
-    n.label = label;
-    n.description = description;
-    n.range = ranges;
-    n.clip = "both";
-    n.extendedType = std::move(extendedType);
-    auto cell = std::make_shared<ValueList>(initial);
-    n.get = [cell] { return *cell; };
-    n.set = [cell, ranges](const ValueList &v) {
-        if (v.size() < cell->size()) return false;
-        ValueList next = *cell;
-        for (std::size_t i = 0; i < next.size(); ++i)
-            if (!like(next[i], v[i], i < ranges.size() ? &ranges[i] : nullptr)) return false;
-        *cell = next;
-        return true;
-    };
-    n.defaultValue = [initial] { return initial; };
-    return n;
 }
 
 void Device::action(const char *path, const char *type, const char *label, const char *description, std::function<bool(const ValueList &)> handler)
@@ -162,29 +94,9 @@ void Device::said(const std::string &path, const ValueList &args)
     m_tree.fire("/generator/last_action", {Value(text)});
 }
 
-void Device::relate(const std::string &parent, const std::vector<std::string> &children)
-{
-    Node *p = m_tree.find(parent);
-    if (!p || !p->set) return;
-    p->set = [this, set = p->set, children](const ValueList &v) {
-        if (!set(v)) return false;
-        for (const std::string &c : children) m_tree.changed(c);
-        return true;
-    };
-    for (const std::string &childPath : children) {
-        Node *c = m_tree.find(childPath);
-        if (!c || !c->set) continue;
-        c->set = [this, set = c->set, parent](const ValueList &v) {
-            if (!set(v)) return false;
-            m_tree.changed(parent);
-            return true;
-        };
-    }
-}
-
 Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent)
 {
-    m_tabs = {"generator", "values", "types", "actions", "access", "structure", "ui"};
+    m_tabs = {"generator", "cues"};
     if (m_persistent) {
         m_saveTimer.setSingleShot(true);
         m_saveTimer.setInterval(400);
@@ -192,12 +104,7 @@ Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent
         load();
     }
     buildGenerator();
-    buildValues();
-    buildTypes();
-    buildActions();
-    buildSignals();
-    buildAccess();
-    buildStructure();
+    buildCues();
     buildUi();
     m_clock.start();
     connect(&m_timer, &QTimer::timeout, this, [this] { tick(); });
@@ -271,7 +178,7 @@ void Device::buildShown()
                 for (const Timeline &t : m_timelines)
                     if (t.slug == v.text()) {
                         s.shown = t.slug;
-                        if (m_timelinesChanged) m_timelinesChanged();
+                        tellTimelines();
                     }
             });
     Node &n = m_tree.add("/generator/shown", std::move(p));
@@ -284,7 +191,7 @@ void Device::buildShown()
         const int n = int(m_timelines.size());
         s.shown = m_timelines[size_t((at + by + n) % n)].slug;
         m_tree.changed("/generator/shown");
-        if (m_timelinesChanged) m_timelinesChanged();
+        tellTimelines();
         return true;
     };
     m_tree.addAction("/generator/shown/next", "N", [move](const ValueList &) { return move(1); }, "The timeline after, round").label = "Next timeline";
@@ -296,7 +203,7 @@ void Device::buildShown()
 void Device::timelinesChanged()
 {
     buildShown();
-    if (m_timelinesChanged) m_timelinesChanged();
+    tellTimelines();
     save();
 }
 
@@ -351,7 +258,7 @@ void Device::renameTimeline(quint64 id, const QString &name)
     t->anim.name = name.trimmed();
     if (Node *n = m_tree.find(base(*t))) n->label = t->anim.name.toStdString();
     tell(*t, before);
-    if (m_timelinesChanged) m_timelinesChanged();
+    tellTimelines();
     save();
 }
 
@@ -368,7 +275,7 @@ void Device::show(quint64 id)
     if (!t || t->slug == s.shown) return;
     s.shown = t->slug;
     m_tree.changed("/generator/shown");
-    if (m_timelinesChanged) m_timelinesChanged();
+    tellTimelines();
 }
 
 void Device::buildTimeline(Timeline &tl)
@@ -410,7 +317,7 @@ void Device::buildTimeline(Timeline &tl)
               if (v.text().empty()) return;
               t.anim.name = QString::fromStdString(v.text());
               if (Node *n = m_tree.find(base(t))) n->label = v.text();
-              if (m_timelinesChanged) m_timelinesChanged();
+              tellTimelines();
           },
           [](CoreParameter &p) { p.byDefault(Value("Timeline")); });
 
@@ -599,7 +506,7 @@ bool Device::animParamValue(quint64 holder, const QString &path, double *value) 
 {
     if (holder) return m_destinations && m_destinations->value(holder, path, value);
     if (path != "output") return false;
-    *value = s.value;
+    *value = 0.5;
     return true;
 }
 
@@ -629,14 +536,145 @@ double Device::filtered(const Timeline &t, size_t index, double raw, double dt)
     return state.processor.step(state.config, dt).value_or(raw);
 }
 
-// ---- kept between launches: the timelines (their transport, their tracks and what each drives)
+// ---- the cue list
 
-void Device::save()
+QStringList Device::cueActionNames()
 {
-    if (m_persistent) m_saveTimer.start();
+    return {QStringLiteral("Start"), QStringLiteral("Play"), QStringLiteral("Pause"), QStringLiteral("Stop"), QStringLiteral("Stop all")};
 }
 
-void Device::writeSettings()
+void Device::buildCues()
+{
+    group("/cues", "Cues", "The cue list: GO fires the cue on standby (after its wait), and the next one too when it continues by itself");
+    action("/cues/go", "N", "GO", "Fires the cue on standby, then the next one is", [this](const ValueList &) {
+        go();
+        return true;
+    });
+    action("/cues/back", "N", "Back", "The cue before is on standby", [this](const ValueList &) {
+        back();
+        return true;
+    });
+    action("/cues/stop_all", "N", "Stop all", "Every timeline stopped, and the cues that wait to act forgotten", [this](const ValueList &) {
+        stopAll();
+        return true;
+    });
+    action("/cues/fire", "i", "Fire", "Fires the cue of that number (1: the first), now: the standby does not move", [this](const ValueList &v) {
+        return fire(int(v.at(0).number().value_or(0.0)) - 1);
+    });
+    auto standby = std::make_unique<CoreParameter>("standby", "Standby", CoreParameter::Type::Int);
+    standby->range(1, 1000).step(1).byDefault(Value(1)).transient();
+    standby->bind([this] { return Value(m_standby + 1); }, [this](const Value &v) { setStandby(int(v.number().value_or(1.0)) - 1); });
+    m_declared.push_back("/cues/standby");
+    m_tree.add("/cues/standby", std::move(standby)).description = "The number of the cue GO fires next (1: the first; past the last: none)";
+    auto next = std::make_unique<CoreParameter>("next", "Next", CoreParameter::Type::Text);
+    next->readOnly().bind([this] { return Value(m_standby < int(m_cues.size()) ? m_cues[size_t(m_standby)].name.toStdString() : std::string()); },
+                          [](const Value &) {});
+    m_declared.push_back("/cues/next");
+    m_tree.add("/cues/next", std::move(next)).description = "The name of the cue on standby (empty: none)";
+    auto count = std::make_unique<CoreParameter>("count", "Cues", CoreParameter::Type::Int);
+    count->readOnly().range(0, 1000).bind([this] { return Value(int(m_cues.size())); }, [](const Value &) {});
+    m_declared.push_back("/cues/count");
+    m_tree.add("/cues/count", std::move(count));
+    signal("/cues/fired", "s", "Fired", "s: the name of a cue that acts (after its wait)");
+}
+
+void Device::cuesChanged()
+{
+    m_tree.changed("/cues/standby");
+    m_tree.changed("/cues/next");
+    m_tree.changed("/cues/count");
+    if (m_cuesChanged) m_cuesChanged();
+}
+
+void Device::setCues(const std::vector<Cue> &cues)
+{
+    m_cues = cues;
+    for (Cue &c : m_cues)
+        if (!c.id) c.id = m_nextCue++;
+    m_standby = std::clamp(m_standby, 0, int(m_cues.size()));
+    cuesChanged();
+    save();
+}
+
+void Device::setStandby(int index)
+{
+    index = std::clamp(index, 0, int(m_cues.size()));
+    if (index == m_standby) return;
+    m_standby = index;
+    cuesChanged();
+}
+
+bool Device::fire(int index)
+{
+    if (index < 0 || index >= int(m_cues.size())) return false;
+    const Cue &c = m_cues[size_t(index)];
+    if (c.wait <= 0) act(c);
+    else m_pending.emplace_back(c.wait, c);
+    return true;
+}
+
+void Device::go()
+{
+    // The cue on standby, and the ones after it that continue from it
+    while (m_standby < int(m_cues.size())) {
+        const int at = m_standby++;
+        fire(at);
+        if (!m_cues[size_t(at)].autoContinue) break;
+    }
+    cuesChanged();
+}
+
+void Device::back()
+{
+    setStandby(m_standby - 1);
+}
+
+void Device::stopAll()
+{
+    m_pending.clear();
+    for (Timeline &t : m_timelines)
+        if (t.anim.state != AnimState::Stopped) control(t.anim.id, AnimAction::Stop);
+    if (m_cuesChanged) m_cuesChanged();
+}
+
+void Device::act(const Cue &cue)
+{
+    switch (cue.action) {
+    case CueAction::StopAll:
+        for (Timeline &t : m_timelines) control(t.anim.id, AnimAction::Stop);
+        break;
+    case CueAction::Start:
+        control(cue.timeline, AnimAction::Rewind);
+        control(cue.timeline, AnimAction::Play);
+        break;
+    case CueAction::Play: control(cue.timeline, AnimAction::Play); break;
+    case CueAction::Pause: control(cue.timeline, AnimAction::Pause); break;
+    case CueAction::Stop: control(cue.timeline, AnimAction::Stop); break;
+    }
+    m_fired = cue.name.toStdString();
+    m_tree.fire("/cues/fired", {Value(m_fired)});
+    if (m_cuesChanged) m_cuesChanged();
+}
+
+void Device::stepCues(double dt)
+{
+    if (m_pending.empty()) return;
+    std::vector<Cue> due;
+    for (auto it = m_pending.begin(); it != m_pending.end();) {
+        it->first -= dt;
+        if (it->first <= 0) {
+            due.push_back(it->second);
+            it = m_pending.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const Cue &c : due) act(c);
+}
+
+// ---- a show, and what is kept between launches: the timelines (their transport, their tracks and what each drives) and the cues
+
+QJsonArray Device::timelinesJson() const
 {
     QJsonArray list;
     for (const Timeline &t : m_timelines) {
@@ -654,14 +692,24 @@ void Device::writeSettings()
         o["tracks"] = tracks;
         list.append(o);
     }
-    QSettings settings;
-    settings.setValue(QStringLiteral("timelines"), QJsonDocument(list).toJson(QJsonDocument::Compact));
-    settings.setValue(QStringLiteral("shown"), QString::fromStdString(s.shown));
+    return list;
 }
 
-void Device::load()
+QJsonArray Device::cuesJson() const
 {
-    const QJsonArray list = QJsonDocument::fromJson(QSettings().value(QStringLiteral("timelines")).toByteArray()).array();
+    QJsonArray list;
+    for (const Cue &c : m_cues)
+        list.append(QJsonObject{{"id", double(c.id)},
+                                {"name", c.name},
+                                {"wait", c.wait},
+                                {"timeline", double(c.timeline)},
+                                {"action", cueActionNames().value(int(c.action)).toLower().replace(' ', '_')},
+                                {"continue", c.autoContinue}});
+    return list;
+}
+
+void Device::readTimelines(const QJsonArray &list)
+{
     for (const QJsonValue &v : list) {
         const QJsonObject o = v.toObject();
         Timeline t;
@@ -683,173 +731,77 @@ void Device::load()
         m_timelines.push_back(std::move(t));
         buildTimeline(m_timelines.back());
     }
-    s.shown = QSettings().value(QStringLiteral("shown")).toString().toStdString();
 }
 
-// ---- /values: a parameter that holds its components
-
-void Device::buildValues()
+void Device::readCues(const QJsonArray &list)
 {
-    group("/values", "Values", "A value that holds its components: a point, a colour. Writing the whole or a component says it to the other");
-
-    Node &position = raw("/values/position", "ff", "Position", "A point: a value (ff) that holds x and y", {range(0, 1), range(0, 1)},
-                         {Value(0.5f), Value(0.5f)}, {"position.cartesian.x", "position.cartesian.y"});
-    position.get = [this] { return ValueList{Value(s.x), Value(s.y)}; };
-    position.set = [this](const ValueList &v) {
-        if (v.size() < 2) return false;
-        s.x = float(std::clamp(v[0].number().value_or(s.x), 0.0, 1.0));
-        s.y = float(std::clamp(v[1].number().value_or(s.y), 0.0, 1.0));
-        return true;
-    };
-    bound("/values/position/x", "X", CoreParameter::Type::Float, s.x, [](CoreParameter &p) { p.range(0, 1).animatable().pointComponent(0); });
-    bound("/values/position/y", "Y", CoreParameter::Type::Float, s.y, [](CoreParameter &p) { p.range(0, 1).animatable().pointComponent(1); });
-    relate("/values/position", {"/values/position/x", "/values/position/y"});
-
-    Node &color = raw("/values/color", "fff", "Color", "A colour: a value (fff) that holds r, g and b, a switch and an action", {range(0, 1), range(0, 1), range(0, 1)},
-                      {Value(1.0f), Value(0.5f), Value(0.0f)}, {"color.rgb.r", "color.rgb.g", "color.rgb.b"});
-    color.get = [this] { return ValueList{Value(s.r), Value(s.g), Value(s.b)}; };
-    color.set = [this](const ValueList &v) {
-        if (v.size() < 3) return false;
-        s.r = float(std::clamp(v[0].number().value_or(s.r), 0.0, 1.0));
-        s.g = float(std::clamp(v[1].number().value_or(s.g), 0.0, 1.0));
-        s.b = float(std::clamp(v[2].number().value_or(s.b), 0.0, 1.0));
-        return true;
-    };
-    bound("/values/color/r", "Red", CoreParameter::Type::Float, s.r, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(0); });
-    bound("/values/color/g", "Green", CoreParameter::Type::Float, s.g, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(1); });
-    bound("/values/color/b", "Blue", CoreParameter::Type::Float, s.b, [](CoreParameter &p) { p.range(0, 1).animatable().colorComponent(2); });
-    bound("/values/color/enable", "Enabled", CoreParameter::Type::Bool, s.tint, [](CoreParameter &p) { p.transient(); });
-    relate("/values/color", {"/values/color/r", "/values/color/g", "/values/color/b"});
-    action("/values/color/set", "fff", "Set the color", "An action under a value: sets the three components", [this](const ValueList &v) {
-        s.r = float(std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0));
-        s.g = float(std::clamp(v.at(1).number().value_or(0.0), 0.0, 1.0));
-        s.b = float(std::clamp(v.at(2).number().value_or(0.0), 0.0, 1.0));
-        for (const char *p : {"/values/color", "/values/color/r", "/values/color/g", "/values/color/b"}) m_tree.changed(p);
-        return true;
-    });
-
-    raw("/values/rgba", "ffff", "Color with alpha", "A colour with its opacity (ffff): a value with no components of its own",
-        {range(0, 1), range(0, 1), range(0, 1), range(0, 1)}, {Value(0.2f), Value(0.6f), Value(1.0f), Value(1.0f)},
-        {"color.rgba.r", "color.rgba.g", "color.rgba.b", "color.rgba.a"});
-    raw("/values/origin", "fff", "Origin", "Three numbers with no meaning of their own (fff), no components", {range(-10, 10), range(-10, 10), range(-10, 10)},
-        {Value(0.0f), Value(0.0f), Value(0.0f)});
+    m_cues.clear();
+    const QStringList actions = cueActionNames();
+    for (const QJsonValue &v : list) {
+        const QJsonObject o = v.toObject();
+        Cue c;
+        c.id = quint64(o.value("id").toDouble());
+        if (!c.id) c.id = m_nextCue;
+        m_nextCue = std::max(m_nextCue, c.id + 1);
+        c.name = o.value("name").toString();
+        c.wait = std::max(0.0, o.value("wait").toDouble());
+        c.timeline = quint64(o.value("timeline").toDouble());
+        const QString action = o.value("action").toString();
+        for (int i = 0; i < actions.size(); ++i)
+            if (actions[i].toLower().replace(' ', '_') == action) c.action = CueAction(i);
+        c.autoContinue = o.value("continue").toBool();
+        m_cues.push_back(c);
+    }
+    m_standby = 0;
 }
 
-// ---- /types: one parameter of each kind
-
-void Device::buildTypes()
+QJsonObject Device::show() const
 {
-    group("/types", "Types", "One parameter of each kind OSC and OSCQuery have: the widget that edits it is the one for its type");
-    stored("/types/switch", "Switch", CoreParameter::Type::Bool, Value(false), [](CoreParameter &) {}).description = "T / F: on or off";
-    stored("/types/int", "Whole number", CoreParameter::Type::Int, Value(0), [](CoreParameter &p) { p.range(-100, 100).step(1); }).description = "i: within -100 and 100";
-    stored("/types/int_among", "One among a few", CoreParameter::Type::Int, Value(4), [](CoreParameter &p) { p.values({1, 2, 4, 8, 16}); }).description = "i: only 1 2 4 8 16";
-    stored("/types/choice", "Choice", CoreParameter::Type::Choice, Value("two"), [](CoreParameter &p) { p.choices({"one", "two", "three"}); }).description = "s: one key among a list";
-    stored("/types/float", "Float", CoreParameter::Type::Float, Value(0.5), [](CoreParameter &p) { p.range(0, 1).step(0.01).animatable(); }).description = "f: within 0 and 1";
-    stored("/types/wide", "Wide float", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(-1000, 1000).step(0.1); }).description = "f: within -1000 and 1000, typed rather than dragged";
-    stored("/types/text", "Text", CoreParameter::Type::Text, Value("hello"), [](CoreParameter &) {}).description = "s: a string";
-    raw("/types/double", "d", "Double", "d: a double", {range(-10, 10)}, {Value(3.141592653589793)});
-    raw("/types/int64", "h", "64-bit number", "h: a 64-bit whole number", {range(0, 9e15)}, {Value(std::int64_t(1234567890123))});
-    raw("/types/blob", "b", "Blob", "b: bytes (shown in hexadecimal)", {ArgRange{}}, {Value(Blob{0xde, 0xad, 0xbe, 0xef})});
+    return QJsonObject{{"timelines", timelinesJson()}, {"cues", cuesJson()}, {"shown", QString::fromStdString(s.shown)}};
 }
 
-// ---- /actions: only actions
-
-void Device::buildActions()
+bool Device::loadShow(const QJsonObject &show, QString *error)
 {
-    group("/actions", "Actions", "Nodes that are only actions: they hold no value and do something when they are received. The last one is told on /signals");
-    action("/actions/none", "N", "No value", "N: nothing is sent, nothing is kept", nullptr);
-    action("/actions/float", "f", "Float", "f: one number", nullptr);
-    action("/actions/int", "i", "Whole number", "i: one whole number", nullptr);
-    action("/actions/text", "s", "Text", "s: one text", nullptr);
-    action("/actions/switch", "T", "Switch", "T: on or off", nullptr);
-    action("/actions/int64", "h", "64-bit number", "h: one 64-bit whole number", nullptr);
-    action("/actions/double", "d", "Double", "d: one double", nullptr);
-    action("/actions/blob", "b", "Blob", "b: bytes", nullptr);
-    action("/actions/point", "ff", "Point", "ff: two numbers", nullptr);
-    action("/actions/color", "fff", "Color", "fff: three numbers", nullptr);
-    action("/actions/several", "if", "Several", "if: a whole number and a number", nullptr);
-    action("/actions/mixed", "sfT", "Mixed", "sfT: a text, a number and a switch", nullptr);
-
-    // A parameter that holds actions
-    bound("/actions/counter", "Counter", CoreParameter::Type::Int, s.counter, [](CoreParameter &p) { p.range(0, 1000).step(1); }).description =
-        "A parameter that holds actions: they move it";
-    action("/actions/counter/increment", "N", "Increment", "+1", [this](const ValueList &) {
-        s.counter = std::min(1000, s.counter + 1);
-        m_tree.changed("/actions/counter");
-        return true;
-    });
-    action("/actions/counter/decrement", "N", "Decrement", "-1", [this](const ValueList &) {
-        s.counter = std::max(0, s.counter - 1);
-        m_tree.changed("/actions/counter");
-        return true;
-    });
-    action("/actions/counter/reset", "N", "Reset", "Back to 0", [this](const ValueList &) {
-        s.counter = 0;
-        m_tree.changed("/actions/counter");
-        return true;
-    });
+    if (!show.value("timelines").isArray()) {
+        if (error) *error = QStringLiteral("no timelines in it");
+        return false;
+    }
+    for (const Timeline &t : m_timelines) m_tree.remove(base(t));
+    m_timelines.clear();
+    m_filters.clear();
+    m_pending.clear();
+    readTimelines(show.value("timelines").toArray());
+    if (m_timelines.empty()) addTimeline();
+    s.shown = show.value("shown").toString().toStdString();
+    readCues(show.value("cues").toArray());
+    timelinesChanged();
+    cuesChanged();
+    writeSettings();
+    m_modified = false;
+    return true;
 }
 
-// ---- /signals: only signals
-
-void Device::buildSignals()
+void Device::save()
 {
-    group("/signals", "Signals", "Nodes that are only signals, of the kinds the generator does not need: the device emits them, nobody writes them");
-    signal("/signals/xy", "ff", "Waveform and opposite", "ff: two numbers that move together", {range(0, 1), range(0, 1)});
-    signal("/signals/rgb", "fff", "Color", "fff: a colour that follows the waveform", {range(0, 1), range(0, 1), range(0, 1)},
-           {"color.rgb.r", "color.rgb.g", "color.rgb.b"});
-    signal("/signals/text", "s", "Text", "s: a text with the loop count. A signal that holds another");
-    signal("/signals/text/length", "i", "Text length", "i: how long that text is");
-    signal("/signals/stamp", "h", "Stamp", "h: milliseconds since 1970 (64 bits)");
-    signal("/signals/digest", "b", "Digest", "b: four bytes that follow the waveform");
+    m_modified = true;
+    if (m_persistent) m_saveTimer.start();
 }
 
-// ---- /access: who can do what
-
-void Device::buildAccess()
+void Device::writeSettings()
 {
-    group("/access", "Access", "Who can read and who can write: what a controller may do with each");
-    bound("/access/read_only", "Read only", CoreParameter::Type::Int, s.uptime, [](CoreParameter &p) { p.readOnly().range(0, 1000000); }).description =
-        "Seconds the device has been running: it can be read, a write is refused";
-    stored("/access/write_only", "Write only", CoreParameter::Type::Text, Value(""), [](CoreParameter &p) { p.writeOnly(); }).description =
-        "It can be written and not read (no VALUE, no feedback)";
-    stored("/access/locked", "Locked", CoreParameter::Type::Float, Value(0.5), [](CoreParameter &p) { p.range(0, 1); }).description =
-        "Locked by the device: every write is refused";
-    m_tree.setLocked("/access/locked", true);
-    stored("/access/transient", "Never saved", CoreParameter::Type::Bool, Value(false), [](CoreParameter &p) { p.transient(); }).description =
-        "A state of the show, not saved with the rest";
-    stored("/access/critical", "Critical", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(0, 1); }).critical = true;
-    m_tree.find("/access/critical")->description = "A write to it must not be lost (CRITICAL)";
-    Node &tagged = stored("/access/tagged", "Tagged", CoreParameter::Type::Text, Value("tags"), [](CoreParameter &) {});
-    tagged.description = "Tags to search by, and an attribute of its own (note)";
-    tagged.tags = {"demo", "text"};
-    tagged.attributes["note"] = [] { return std::optional<std::string>("\"an attribute of the device, not of OSCQuery\""); };
-
-    auto trigger = std::make_unique<CoreParameter>("trigger", "Trigger", CoreParameter::Type::Trigger);
-    trigger->bind(nullptr, [this](const Value &) { said("/access/trigger", {}); });
-    m_tree.add("/access/trigger", std::move(trigger)).description = "A parameter that is an action without a value";
+    if (!m_persistent) return;
+    QSettings settings;
+    settings.setValue(QStringLiteral("timelines"), QJsonDocument(timelinesJson()).toJson(QJsonDocument::Compact));
+    settings.setValue(QStringLiteral("cues"), QJsonDocument(cuesJson()).toJson(QJsonDocument::Compact));
+    settings.setValue(QStringLiteral("shown"), QString::fromStdString(s.shown));
 }
 
-// ---- /structure: only nodes
-
-void Device::buildStructure()
+void Device::load()
 {
-    group("/structure", "Structure", "Nodes that only hold nodes: empty, deep, side by side");
-    group("/structure/empty", "Empty", "A node with nothing in it");
-    group("/structure/a", "A", "Four levels down");
-    group("/structure/a/b", "B", "");
-    group("/structure/a/b/c", "C", "");
-    group("/structure/a/b/c/d", "D", "");
-    stored("/structure/a/b/c/d/leaf", "Leaf", CoreParameter::Type::Bool, Value(false), [](CoreParameter &) {}).description = "The only parameter at the bottom";
-    stored("/structure/a/b/sibling", "Sibling", CoreParameter::Type::Int, Value(0), [](CoreParameter &p) { p.range(0, 10).step(1); }).description =
-        "Beside the node C, in B";
-    group("/structure/mixed", "Mixed", "A parameter, an action and a signal side by side: each is a different kind of leaf");
-    stored("/structure/mixed/value", "Value", CoreParameter::Type::Float, Value(0.0), [](CoreParameter &p) { p.range(0, 1); }).description = "A parameter";
-    action("/structure/mixed/hit", "N", "Hit", "An action: it fires the pulse", [this](const ValueList &) {
-        m_tree.fire("/structure/mixed/pulse");
-        return true;
-    });
-    signal("/structure/mixed/pulse", "N", "Pulse", "A signal: an impulse, at each hit and at each loop");
+    QSettings settings;
+    readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array());
+    readCues(QJsonDocument::fromJson(settings.value(QStringLiteral("cues")).toByteArray()).array());
+    s.shown = settings.value(QStringLiteral("shown")).toString().toStdString();
 }
 
 // ---- /ui: the window's own state
@@ -866,8 +818,6 @@ void Device::buildUi()
         m_tree.changed("/ui/tab");
         return true;
     };
-    bound("/ui/signals", "Signals drawer", CoreParameter::Type::Bool, s.drawer, [](CoreParameter &p) { p.transient(); }).description =
-        "The drawer that shows the signals: open or closed";
     action("/ui/tab/next", "N", "Next tab", "The tab after, round", [move](const ValueList &) { return move(1); });
     action("/ui/tab/previous", "N", "Previous tab", "The tab before, round", [move](const ValueList &) { return move(-1); });
 }
@@ -878,10 +828,7 @@ void Device::tick()
 {
     const double dt = m_clock.restart() / 1000.0;
     m_up += dt;
-    if (int(m_up) != s.uptime) {
-        s.uptime = int(m_up);
-        m_tree.changed("/access/read_only");
-    }
+    stepCues(dt);
     for (Timeline &t : m_timelines) {
         const std::string b = base(t);
         if (t.anim.state == AnimState::Playing) {
@@ -890,12 +837,6 @@ void Device::tick()
             const bool more = t.anim.advance(dt);
             if (t.anim.pass() != pass) { // a new pass
                 m_tree.fire(b + "/signals/cycle");
-                if (&t == &m_timelines.front()) {
-                    m_tree.fire("/structure/mixed/pulse");
-                    const std::string text = "pass " + std::to_string(t.anim.pass());
-                    m_tree.fire("/signals/text", {Value(text)});
-                    m_tree.fire("/signals/text/length", {Value(int(text.size()))});
-                }
             }
             if (!more) { // its passes are done: it stops where it ends, its last value held
                 t.anim.state = AnimState::Stopped;
@@ -917,15 +858,6 @@ void Device::tick()
         m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});
         m_tree.fire(b + "/signals/seconds", {Value(t.anim.played())});
     }
-    // The test signals follow the first track of the first timeline
-    const Timeline &first = m_timelines.front();
-    if (!first.values.empty() && std::isfinite(first.values.front())) s.value = first.values.front();
-    m_tree.fire("/signals/xy", {Value(float(std::clamp(s.value, 0.0, 1.0))), Value(float(std::clamp(1 - s.value, 0.0, 1.0)))});
-    m_tree.fire("/signals/rgb", {Value(float(std::clamp(s.value * s.r, 0.0, 1.0))), Value(float(std::clamp(s.value * s.g, 0.0, 1.0))),
-                                      Value(float(std::clamp(s.value * s.b, 0.0, 1.0)))});
-    m_tree.fire("/signals/stamp", {Value(std::int64_t(QDateTime::currentMSecsSinceEpoch()))});
-    const std::uint8_t level = std::uint8_t(std::clamp(s.value, 0.0, 1.0) * 255);
-    m_tree.fire("/signals/digest", {Value(Blob{level, std::uint8_t(255 - level), level, std::uint8_t(255 - level)})});
     if (m_ticked) m_ticked();
 }
 

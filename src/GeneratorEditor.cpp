@@ -266,23 +266,26 @@ GeneratorPage::GeneratorPage(Device *device, QWidget *parent) : QWidget(parent),
         if (ok) m_device->renameTimeline(id, name);
     });
 
-    device->onTimelinesChanged([this] { sync(); });
-    device->onTick([this] {
-        m_editor->poll();
-        // What each timeline does, on its sub-tab: ▶ while it plays
-        for (int i = 0; i < m_tabs->count(); ++i)
-            if (const Device::Timeline *t = m_device->timeline(m_tabs->tabData(i).toULongLong())) {
-                const QString text = (t->anim.state == AnimState::Playing ? QStringLiteral("▶  ") : QString()) + t->anim.name;
-                if (m_tabs->tabText(i) != text) m_tabs->setTabText(i, text);
-            }
-        if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
-    });
+    m_listener = device->addTimelinesListener([this] { sync(); });
     sync();
+}
+
+// A step of the device: the playhead, ▶ on the sub-tabs of the timelines that play, what was sent
+void GeneratorPage::tick()
+{
+    m_editor->poll();
+    // What each timeline does, on its sub-tab: ▶ while it plays
+    for (int i = 0; i < m_tabs->count(); ++i)
+        if (const Device::Timeline *t = m_device->timeline(m_tabs->tabData(i).toULongLong())) {
+            const QString text = (t->anim.state == AnimState::Playing ? QStringLiteral("▶  ") : QString()) + t->anim.name;
+            if (m_tabs->tabText(i) != text) m_tabs->setTabText(i, text);
+        }
+    if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
 }
 
 GeneratorPage::~GeneratorPage()
 {
-    m_device->onTimelinesChanged(nullptr);
+    m_device->forgetTimelinesListener(m_listener);
     m_device->onTick(nullptr);
 }
 

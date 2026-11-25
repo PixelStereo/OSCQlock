@@ -38,6 +38,7 @@ class GeneratorPage : public QWidget
 public:
     GeneratorPage(Device *device, QWidget *parent = nullptr);
     ~GeneratorPage() override;
+    void tick(); // a step of the device (the window calls it)
 
 private:
     void sync(); // the sub-tabs from the Device's timelines, the one shown in the editor
@@ -47,4 +48,5 @@ private:
     QLabel *m_status;
     TimelineEditor *m_editor;
     bool m_syncing = false;
+    int m_listener = 0;
 };
