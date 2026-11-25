@@ -1,6 +1,6 @@
 #pragma once
 // What the window does, as undo steps (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z): a timeline edited in the editor (a drag, the arrows of a number
-// merged into one step), a timeline made, removed or renamed, the sequence edited. What OSC writes is not undone: it is the show playing.
+// merged into one step), a timeline made, removed or renamed (the sequence's edits are pxs::sequenceview's SetSequence). What OSC writes is not undone: it is the show playing.
 #include "Device.h"
 
 #include <QUndoCommand>
@@ -72,23 +72,6 @@ private:
     Device *m_device;
     quint64 m_id;
     QString m_before, m_after;
-};
-
-// A sequence as it was edited (a step made, removed, moved, its waits or what it does)
-class SetSequence : public QUndoCommand
-{
-public:
-    SetSequence(Device *device, int index, const Sequencer::Sequence &before, const Sequencer::Sequence &after, const QString &text)
-        : QUndoCommand(text), m_device(device), m_index(index), m_before(before), m_after(after)
-    {
-    }
-    void redo() override { m_device->sequencer().setSequence(m_index, m_after); }
-    void undo() override { m_device->sequencer().setSequence(m_index, m_before); }
-
-private:
-    Device *m_device;
-    int m_index;
-    Sequencer::Sequence m_before, m_after;
 };
 
 } // namespace cmd

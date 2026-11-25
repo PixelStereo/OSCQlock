@@ -7,12 +7,12 @@
 #include "Device.h"
 #include "DevicesWindow.h"
 #include "Commands.h"
-#include "SequencePage.h"
 #include "GeneratorEditor.h"
 #include "Panel.h"
 #include "Show.h"
 
 #include <pxs/OscService.h>
+#include <pxs/SequenceView.h>
 #include <pxs/Theme.h>
 #include <Fields.h>
 
@@ -225,7 +225,7 @@ int selfTest()
     Sequencer::Step one;
     one.description = QStringLiteral("One");
     more.steps.push_back(one);
-    history.push(new cmd::SetSequence(&device, 0, was, more, QStringLiteral("New Step")));
+    history.push(new pxs::sequenceview::SetSequence(device.sequencer(), 0, was, more, QStringLiteral("New Step")));
     undone = undone && device.sequencer().sequence(0).steps.size() == was.steps.size() + 1;
     history.undo();
     undone = undone && device.sequencer().sequence(0).steps.size() == was.steps.size();
@@ -364,7 +364,24 @@ int main(int argc, char **argv)
         // Undo / redo: what is edited in the window (timelines, the sequence), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
         auto *undo = new QUndoStack(&window);
         auto *generator = new GeneratorPage(&device, undo);
-        auto *sequence = new SequencePage(&device, undo);
+        // The cue list: pxs's view of NyxMap's sequencer, its steps driving these timelines
+        struct SequenceTargets : pxs::sequenceview::SequenceViewHost {
+            Device *device;
+            std::vector<std::pair<quint64, QString>> timelines() const override
+            {
+                std::vector<std::pair<quint64, QString>> out;
+                for (const Device::Timeline &t : device->timelines()) out.emplace_back(t.anim.id, t.anim.name);
+                return out;
+            }
+            quint64 currentTimeline() const override { return device->shown(); }
+            void stopAll(Sequencer &) override { device->stopAll(); }
+        };
+        auto *targets = new SequenceTargets;
+        targets->device = &device;
+        auto *sequence = new pxs::sequenceview::SequenceView(device.sequencer(), targets, undo);
+        QObject::connect(sequence, &QObject::destroyed, [targets] { delete targets; });
+        const int sequenceListener = device.addTimelinesListener([sequence] { sequence->rebuild(); }); // the timelines a step can drive
+        QObject::connect(sequence, &QObject::destroyed, [&device, sequenceListener] { device.forgetTimelinesListener(sequenceListener); });
         auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"sequence", sequence}});
         controls->setMinimumSize(640, 380);
         controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
