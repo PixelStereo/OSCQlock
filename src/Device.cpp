@@ -252,10 +252,18 @@ void Device::buildGenerator()
 
 void Device::buildShown()
 {
-    m_tree.remove("/generator/shown");
     std::vector<std::string> slugs;
     for (const Timeline &t : m_timelines) slugs.push_back(t.slug);
     if (std::find(slugs.begin(), slugs.end(), s.shown) == slugs.end()) s.shown = slugs.empty() ? std::string() : slugs.front();
+    // Already there: its choices are changed where it is (a client that listens to it keeps listening)
+    if (Node *shown = m_tree.find("/generator/shown"); shown && shown->parameter()) {
+        shown->parameter()->choices(slugs);
+        ArgRange keys;
+        for (const std::string &slug : slugs) keys.vals.emplace_back(slug);
+        shown->range = {keys};
+        m_tree.changed("/generator/shown");
+        return;
+    }
     auto p = std::make_unique<CoreParameter>("shown", "Shown", CoreParameter::Type::Choice);
     p->choices(slugs).byDefault(Value(slugs.empty() ? std::string() : slugs.front())).transient();
     p->bind([this] { return Value(s.shown); },

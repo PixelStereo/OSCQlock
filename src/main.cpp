@@ -116,8 +116,48 @@ int selfTest()
     }
     const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/generator/timeline1/tracks/2");
     if (!sent) std::fprintf(stderr, "OSCQlock: a track did not reach its OSC device through its filter (received %g)\n", received);
+
+    // A track that drives an OSCQuery device: OSCQlock itself, added by its address (its namespace read, then written over OSC). A number
+    // and a switch of its own tree take what the tracks say
+    const quint64 query = destinations.addOscQuery(QStringLiteral("127.0.0.1"), service.httpPort());
+    {
+        QEventLoop wait;
+        QObject::connect(&destinations, &Destinations::changed, &wait, [&] {
+            if (const Destination *d = destinations.find(query); d && d->online) wait.quit();
+        });
+        QTimer::singleShot(5000, &wait, &QEventLoop::quit);
+        if (!destinations.find(query)->online) wait.exec();
+    }
+    Animation driving = device.timelines().front().anim;
+    AnimTrack number, onOff;
+    number.layer = onOff.layer = query;
+    number.param = QStringLiteral("/types/float");
+    number.keys = {AnimKey{0, 0.25, 0}};
+    onOff.param = QStringLiteral("/types/switch");
+    onOff.keys = {AnimKey{0, 1, 0}};
+    driving.tracks.push_back(number);
+    driving.tracks.push_back(onOff);
+    device.setTimeline(first, driving);
+    const auto value = [&device](const char *path) {
+        const pxs::core::tree::Node *n = device.tree().find(path);
+        return n && n->get ? n->get().front() : Value();
+    };
+    {
+        QEventLoop wait;
+        QTimer poll;
+        QObject::connect(&poll, &QTimer::timeout, &wait, [&] {
+            if (std::abs(value("/types/float").number().value_or(-1) - 0.25) < 1e-4 && value("/types/switch").truthy()) wait.quit();
+        });
+        poll.start(20);
+        QTimer::singleShot(5000, &wait, &QEventLoop::quit);
+        wait.exec();
+    }
+    const bool queried = destinations.find(query)->online && !destinations.params(query).empty() &&
+                         std::abs(value("/types/float").number().value_or(-1) - 0.25) < 1e-4 && value("/types/switch").truthy();
+    if (!queried) std::fprintf(stderr, "OSCQlock: a track did not reach its OSCQuery device (float %g, switch %d)\n",
+                               value("/types/float").number().value_or(-1), int(value("/types/switch").truthy()));
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent;
+    feedback = feedback && made && sent && queried;
 
     bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
