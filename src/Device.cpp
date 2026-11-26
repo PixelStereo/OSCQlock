@@ -1,4 +1,5 @@
 #include "Device.h"
+#include <pxs/PresetView.h>
 #include "Show.h"
 
 #include <pxs/core/tree/parameter.h>
@@ -700,42 +701,17 @@ double Device::animationRemaining(quint64 id) const
 QJsonArray Device::timelinesJson() const
 {
     QJsonArray list;
-    for (const Timeline &t : m_timelines) {
-        QJsonObject o{{"id", double(t.anim.id)}, {"name", t.anim.name}};
-        animTransportToJson(t.anim, o);
-        QJsonArray tracks;
-        for (const AnimTrack &track : t.anim.tracks) {
-            QJsonObject j;
-            animTrackToJson(track, j);
-            j["holder"] = double(track.layer);
-            j["path"] = track.param;
-            j["enabled"] = track.enabled;
-            tracks.append(j);
-        }
-        o["tracks"] = tracks;
-        list.append(o);
-    }
+    for (const Timeline &t : m_timelines) list.append(animationDefinitionToJson(t.anim));
     return list;
 }
 
 void Device::readTimelines(const QJsonArray &list)
 {
     for (const QJsonValue &v : list) {
-        const QJsonObject o = v.toObject();
+        const auto animation = animationDefinitionFromJson(v.toObject());
+        if (!animation || timeline(animation->id)) continue;
         Timeline t;
-        t.anim.id = quint64(o.value("id").toDouble());
-        if (!t.anim.id || timeline(t.anim.id)) continue;
-        t.anim.name = o.value("name").toString(QStringLiteral("Timeline"));
-        animTransportFromJson(t.anim, o);
-        for (const QJsonValue &x : o.value("tracks").toArray()) {
-            const QJsonObject j = x.toObject();
-            AnimTrack track;
-            animTrackFromJson(track, j, t.anim.duration);
-            track.layer = quint64(j.value("holder").toDouble());
-            track.param = j.value("path").toString();
-            track.enabled = j.value("enabled").toBool(true);
-            t.anim.tracks.push_back(track);
-        }
+        t.anim = *animation;
         t.slug = slugOf(t.anim.id);
         m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
         m_timelines.push_back(std::move(t));
@@ -801,7 +777,12 @@ void Device::recallPreset(int index, double fade)
 
 void Device::recallPreset(int index, double fade, const pxs::core::tree::Preset &overrides)
 {
-    if (index < 0 || index >= int(m_presets.size())) return;
+    applyPreset(index, fade, overrides);
+}
+
+bool Device::applyPreset(int index, double fade, const pxs::core::tree::Preset &overrides)
+{
+    if (index < 0 || index >= int(m_presets.size())) return false;
     const auto preset = m_presets[index].resolved(overrides, fade);
     const auto reject = [&](const std::string &path) {
         const auto message = QStringLiteral("Preset %1 · unavailable target %2")
@@ -813,17 +794,25 @@ void Device::recallPreset(int index, double fade, const pxs::core::tree::Preset 
         const auto *node = m_tree.find(path);
         if (!node || node->locked) {
             reject(path);
-            return;
+            return false;
         }
         if (path.rfind("/devices/", 0) == 0) {
             const auto device = m_destinations ? m_destinations->presetDevice(path) : 0;
             if (!m_destinations || !m_destinations->online(device)) {
                 reject(path);
-                return;
+                return false;
             }
         }
     }
+    const auto definitions = pxs::presetview::prepareTimelines(preset, [this](quint64 id) { return timeline(id) != nullptr; });
+    if (!definitions) {
+        reject("timeline");
+        return false;
+    }
+    for (const auto &animation : *definitions) setTimeline(animation.id, animation);
+    if (!definitions->empty()) timelinesChanged();
     m_presetPlayback.start(m_tree, preset);
+    return true;
 }
 
 double Device::presetDuration(quint64 id, double fade, const pxs::core::tree::Preset &overrides) const

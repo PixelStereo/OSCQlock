@@ -62,7 +62,7 @@ bool open(const QString &path, Device &device, Destinations &destinations, QStri
             if (holder) {
                 const auto found = ids.find(holder);
                 track["holder"] = found == ids.end() ? 0.0 : double(found->second);
-                if (found == ids.end()) track["enabled"] = false; // a device the file does not say: nothing to drive
+                if (found == ids.end()) track["enable"] = false; // a device the file does not say: nothing to drive
             }
             tracks[k] = track;
         }

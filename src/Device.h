@@ -112,6 +112,7 @@ public:
     double animationRemaining(quint64 id) const override;
     int indexOfPreset(quint64 id) const override;
     void onPresetRejected(std::function<void(const QString &)> fn) { m_presetRejected = std::move(fn); }
+    bool applyPreset(int index, double fade = -1, const pxs::core::tree::Preset &overrides = {});
     void recallPreset(int index, double fade) override;
     void recallPreset(int index, double fade, const pxs::core::tree::Preset &overrides) override;
     double presetDuration(quint64 id, double fade, const pxs::core::tree::Preset &overrides) const override;

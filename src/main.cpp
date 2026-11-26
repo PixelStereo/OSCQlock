@@ -7,6 +7,7 @@
 #include "Device.h"
 #include <pxs/DevicesPanel.h>
 #include <pxs/OutputsPanel.h>
+#include <QJsonDocument>
 #include <QTabWidget>
 #include "Commands.h"
 #include "GeneratorEditor.h"
@@ -294,8 +295,22 @@ int selfTest()
     const bool scaled = direct && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255;
     if (!scaled) std::fprintf(stderr, "OSCQlock: raw DMX output or explicit Remap failed\n");
 
+    auto timelinePreset = pxs::core::tree::Preset{};
+    timelinePreset.id = "12346";
+    timelinePreset.scope = "timeline:" + std::to_string(remapped.id);
+    timelinePreset.timelines[std::to_string(remapped.id)] =
+        QJsonDocument(animationDefinitionToJson(remapped)).toJson(QJsonDocument::Compact).toStdString();
+    device.setPresets({pxs::core::tree::Preset::fromJson(timelinePreset.toJson())});
+    auto stripped = remapped;
+    stripped.tracks.clear();
+    device.setTimeline(stripped.id, stripped);
+    const bool restored = device.applyPreset(0)
+        && device.timeline(remapped.id)->anim.tracks.size() == 1
+        && device.timeline(remapped.id)->anim.tracks.front().dataFilters == dimmerTrack.dataFilters;
+    if (!restored) std::fprintf(stderr, "OSCQlock: timeline preset recall did not restore the track and its filters\n");
+
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled;
+    feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled && restored;
 
     const auto *tab = device.tree().find("/ui/tab");
     const bool named = tab && device.tree().apply("/ui/tab", {Value("timelines")}) == 1
@@ -439,7 +454,20 @@ int main(int argc, char **argv)
 
         struct PresetScopes : pxs::presetview::PresetHost {
             const Destinations &destinations;
-            explicit PresetScopes(const Destinations &d) : destinations(d) {}
+            Device &device;
+            PresetScopes(const Destinations &d, Device &owner) : destinations(d), device(owner) {}
+            std::vector<std::pair<quint64, QString>> timelineScopes() const override
+            {
+                std::vector<std::pair<quint64, QString>> out;
+                for (const auto &timeline : device.timelines()) out.emplace_back(timeline.anim.id, timeline.anim.name);
+                return out;
+            }
+            std::optional<Animation> readTimeline(quint64 id) const override
+            {
+                if (const auto *timeline = device.timeline(id)) return timeline->anim;
+                return std::nullopt;
+            }
+            void restoreTimeline(const Animation &animation) override { device.setTimeline(animation.id, animation); }
             std::vector<std::pair<QString, QString>> scopes() const override
             {
                 std::vector<std::pair<QString, QString>> out{{{}, QStringLiteral("All known parameters")},
@@ -450,12 +478,16 @@ int main(int argc, char **argv)
                 return out;
             }
         };
-        auto *scopes = new PresetScopes(destinations);
+        auto *scopes = new PresetScopes(destinations, device);
         auto *presetView = new pxs::presetview::PresetView(device.tree(), undo, scopes);
         QObject::connect(presetView, &QObject::destroyed, [scopes] { delete scopes; });
         QObject::connect(&destinations, &Destinations::changed, presetView, &pxs::presetview::PresetView::rebuildScopes);
         presetView->setPresets(device.presets());
-        presetView->setRecaller([&device](int index) { device.recallPreset(index, -1); });
+        presetView->setRecaller([&device](int index) { return device.applyPreset(index); });
+        const int scopeListener = device.addTimelinesListener([presetView] { presetView->rebuildScopes(); });
+        QObject::connect(presetView, &QObject::destroyed, [&device, scopeListener] {
+            device.forgetTimelinesListener(scopeListener);
+        });
         auto editingPreset = std::make_shared<bool>(false);
         QObject::connect(presetView, &pxs::presetview::PresetView::presetsChanged, [&device, presetView, editingPreset] {
             QScopedValueRollback guard(*editingPreset, true);
