@@ -7,8 +7,9 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Widgets Network)
 find_package(Threads REQUIRED)
+include(cmake/Midi.cmake)
 
-# pxs-qt (OSC, OSCQuery, the parameter tree, the look) is a submodule, and it carries pxs-core itself: nothing else to pin
+# pxs-qt (OSC, OSCQuery, the parameter tree, the look) is a submodule, and it carries pxs-core itself
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pxs-qt/CMakeLists.txt")
     message(FATAL_ERROR "third_party/pxs-qt is empty: run\n  git submodule update --init --recursive")
 endif()

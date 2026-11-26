@@ -139,7 +139,7 @@ public:
 private:
     // What the generator is: every parameter of /generator reads and writes one of these
     struct State {
-        std::string tab = "generator";
+        std::string tab = "timelines";
         std::string shown; // the timeline shown, its slug
     };
 

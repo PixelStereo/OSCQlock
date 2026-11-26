@@ -42,6 +42,7 @@ public:
         if (dest && !d->online(dest->id)) where += QStringLiteral(" (offline)");
         m_target->setText(t.param.isEmpty() ? QStringLiteral("(choose what it drives)")
                                             : QStringLiteral("%1  ›  %2").arg(where, t.layer == 0 ? QStringLiteral("Output") : t.param));
+        showDmxOutput();
         m_filling = false;
         TrackRow::fill();
     }
@@ -61,6 +62,11 @@ protected:
         g->addWidget(m_on, 0, 0);
         g->addWidget(m_target, 0, 1, 1, 2);
         g->addWidget(del, 0, 3);
+        m_dmxOutput = new QLabel;
+        m_dmxOutput->setWordWrap(true);
+        g->addWidget(m_dmxOutput, 1, 1, 1, 3);
+        if (auto *destinations = m_tl->device()->destinations())
+            connect(&destinations->manager(), &pxs::devices::Devices::dmxChanged, this, [this] { showDmxOutput(); });
         connect(m_on, &QCheckBox::toggled, this, [this](bool on) {
             if (m_filling) return;
             track().enabled = on;
@@ -73,6 +79,29 @@ protected:
     }
 
 private:
+    void showDmxOutput()
+    {
+        if (!m_dmxOutput) return;
+        const auto &target = track();
+        const auto *destinations = m_tl->device()->destinations();
+        const auto *device = destinations ? destinations->find(target.layer) : nullptr;
+        const auto *address = device && device->kind == pxs::devices::Kind::Dmx
+            ? device->address(target.param.toStdString()) : nullptr;
+        m_dmxOutput->setVisible(address != nullptr);
+        if (!address) return;
+        const auto [channel, width] = pxs::core::device::dmxChannels(*device, *address);
+        const auto level = destinations->manager().dmxLevel(target.layer, target.param);
+        const QString patch = !channel ? QStringLiteral("Invalid DMX patch")
+            : width == 2 ? QStringLiteral("U%1 ch %2–%3").arg(device->universe).arg(channel).arg(channel + 1)
+                         : QStringLiteral("U%1 ch %2").arg(device->universe).arg(channel);
+        m_dmxOutput->setText(QStringLiteral("%1 · %2–%3 → 0–%4 · DMX %5")
+            .arg(patch, QString::number(address->min), QString::number(address->max))
+            .arg(address->fine ? 65535 : 255)
+            .arg(level ? QString::number(*level) : QStringLiteral("—")));
+        m_dmxOutput->setToolTip(QStringLiteral("Track values are clamped to the input range and scaled to the DMX range. "
+                                               "The final value is read from the output universe buffer."));
+    }
+
     void fillMenu()
     {
         QMenu *menu = m_target->menu();
@@ -121,6 +150,7 @@ private:
 
     TimelineEditor *m_tl;
     QCheckBox *m_on = nullptr;
+    QLabel *m_dmxOutput = nullptr;
     QPushButton *m_target = nullptr;
 };
 

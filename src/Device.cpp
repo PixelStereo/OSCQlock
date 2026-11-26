@@ -96,7 +96,7 @@ void Device::said(const std::string &path, const ValueList &args)
 
 Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent), m_sequencer(*this, m_lock, this)
 {
-    m_tabs = {"generator", "sequence", "presets"};
+    m_tabs = {"timelines", "sequence", "presets"};
     if (m_persistent) {
         m_saveTimer.setSingleShot(true);
         m_saveTimer.setInterval(400);
@@ -136,7 +136,7 @@ AnimTrack firstTrack()
 
 void Device::buildGenerator()
 {
-    group("/generator", "Generator",
+    group("/generator", "Timelines",
           "The timelines, as NyxMap's: each a sub-tab, its tracks driving OSCQlock's own outputs or the devices of the network, through filters. "
           "A node that holds nodes that hold parameters, actions, signals, or a mix");
     action("/generator/new", "N", "New timeline", "A timeline more, shown", [this](const ValueList &) {
@@ -1008,8 +1008,12 @@ void Device::load()
 void Device::buildUi()
 {
     group("/ui", "Interface", "What the window shows: the tab and the drawer of the signals are parameters like the others, and move by OSC");
-    bound("/ui/tab", "Tab", CoreParameter::Type::Choice, s.tab, [this](CoreParameter &p) { p.choices(m_tabs); }).description =
-        "The tab of the window (the name of a top-level node). A parameter that holds actions";
+    auto &tab = bound("/ui/tab", "Tab", CoreParameter::Type::Choice, s.tab, [this](CoreParameter &p) { p.choices(m_tabs); });
+    tab.description = "The active section of the window";
+    tab.set = [set = std::move(tab.set)](const ValueList &values) {
+        if (values.size() == 1 && values.front().text() == "generator") return set({Value("timelines")});
+        return set(values);
+    };
     auto move = [this](int by) {
         const auto at = std::find(m_tabs.begin(), m_tabs.end(), s.tab);
         const int n = int(m_tabs.size());

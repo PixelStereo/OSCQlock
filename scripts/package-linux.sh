@@ -16,6 +16,7 @@ mkdir -p "$app/usr/bin" "$app/usr/share/applications" "$app/usr/share/icons/hico
 cp "$build/$name" "$app/usr/bin/oscqlock"
 cp "$root/packaging/oscqlock.desktop" "$app/usr/share/applications/oscqlock.desktop"
 mkdir -p "$app/usr/share/doc/oscqlock" && cp "$root/LICENSE" "$app/usr/share/doc/oscqlock/LICENSE.txt"
+cp "$root/third_party/rtmidi/LICENSE" "$app/usr/share/doc/oscqlock/RTMIDI-LICENSE.txt"
 cp "$root/packaging/oscqlock.png" "$app/usr/share/icons/hicolor/256x256/apps/oscqlock.png"
 
 cd "$work"

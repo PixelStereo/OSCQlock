@@ -270,8 +270,10 @@ int selfTest()
     device.tree().removeObserver(watching);
     feedback = feedback && made && sent && queried && cued && shown && undone && timed;
 
-    bool served = !body.isEmpty() && feedback;
-    for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
+    const auto *tab = device.tree().find("/ui/tab");
+    const bool renamed = tab && device.tree().apply("/ui/tab", {Value("generator")}) == 1
+        && tab->get().front().text() == "timelines";
+    const bool served = !body.isEmpty() && feedback && renamed;
     std::puts(served && problems.empty() ? "OSCQlock: ok" : "OSCQlock: the tree or the server is not what it must be");
     return served && problems.empty() ? 0 : 1;
 }
@@ -305,7 +307,7 @@ int main(int argc, char **argv)
     QCommandLineOption check("check", "Start, check the tree and the OSCQuery server, and exit (no window).");
     QCommandLineOption screenshot("screenshot", "Save a picture of the window (PNG) once it is shown, and exit. With --tab, the tab it shows.", "file");
     QCommandLineOption showOption("show", "The show (.oscqlock) to open at start (also headless: a show box).", "file");
-    QCommandLineOption tabOption("tab", "The tab the window opens on (generator, values, types…; devices: the Devices window too).", "name");
+    QCommandLineOption tabOption("tab", "The section to focus (timelines, sequence, presets; devices for a Device Manager screenshot).", "name");
     cli.addOptions({name, oscPort, httpPort, local, headless, check, screenshot, showOption, tabOption});
     cli.process(app);
 
@@ -505,10 +507,14 @@ int main(int argc, char **argv)
             inspector->addWidget(details);
             inspector->setCurrentWidget(details);
         };
-        sequence->setInspectorSink(showDetails);
+        sequence->setInspectorSink([&device, showDetails](QWidget *details) {
+            device.tree().apply("/ui/tab", {Value("sequence")});
+            showDetails(details);
+        });
         QObject::connect(patchPanel, &pxs::devices::DevicesPanel::deviceSelected, inspector,
                          [inspector, patchPanel](quint64) { inspector->setCurrentWidget(patchPanel->inspector()); });
         generator->setInspectorSink([&device, showDetails](quint64 id) {
+            device.tree().apply("/ui/tab", {Value("timelines")});
             const auto *timeline = device.timeline(id);
             if (!timeline) return;
             auto *details = new QWidget;
@@ -519,7 +525,10 @@ int main(int argc, char **argv)
             showDetails(details);
         });
         QObject::connect(presetView, &pxs::presetview::PresetView::presetSelected, inspector,
-                         [inspector, presetView] { inspector->setCurrentWidget(presetView->inspector()); });
+                         [inspector, presetView, &device] {
+                             device.tree().apply("/ui/tab", {Value("presets")});
+                             inspector->setCurrentWidget(presetView->inspector());
+                         });
         auto *editor = new QSplitter(Qt::Horizontal);
         editor->addWidget(workspace);
         auto *inspection = new QWidget;
@@ -629,7 +638,18 @@ int main(int argc, char **argv)
         });
 
         window.resize(1480, 860);
-        if (cli.isSet(tabOption)) device.tree().apply("/ui/tab", {Value(cli.value(tabOption).toStdString())});
+        const auto focusSection = [generator, sequence, presetView](const pxs::core::tree::Node &node, const auto &) {
+            if (node.path() != "/ui/tab") return;
+            const auto tab = node.get().front().text();
+            QWidget *section = tab == "sequence" ? static_cast<QWidget *>(sequence)
+                : tab == "presets" ? static_cast<QWidget *>(presetView) : static_cast<QWidget *>(generator);
+            if (auto *focused = QApplication::focusWidget(); focused && (focused == section || section->isAncestorOf(focused))) return;
+            section->setFocus(Qt::OtherFocusReason);
+        };
+        const int tabObserver = device.tree().addObserver(focusSection);
+        QObject::connect(&window, &QObject::destroyed, [&device, tabObserver] { device.tree().removeObserver(tabObserver); });
+        if (cli.isSet(tabOption) && cli.value(tabOption) != QLatin1String("devices"))
+            device.tree().apply("/ui/tab", {Value(cli.value(tabOption).toStdString())});
         window.show();
         const bool devicesShot = cli.value(tabOption) == QLatin1String("devices"); // --tab devices: the Devices window
 

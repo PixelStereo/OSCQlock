@@ -80,6 +80,7 @@ jobs:
           app_name=$(python3 -c 'import json; print(json.load(open("build/application.json"))["name"])')
           file "build/$app_name.app/Contents/MacOS/$app_name"
           cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt" 2>/dev/null || { mkdir -p "build/$app_name.app/Contents/Resources"; cp LICENSE "build/$app_name.app/Contents/Resources/LICENSE.txt"; }
+          cp third_party/rtmidi/LICENSE "build/$app_name.app/Contents/Resources/RTMIDI-LICENSE.txt"
           bash third_party/pxs-qt/scripts/package-macos.sh build/application.json build "$archive"
           # The zip, not the folder: extracted, verified, started
           rm -rf "$RUNNER_TEMP/smoke" && mkdir -p "$RUNNER_TEMP/smoke"
@@ -125,6 +126,7 @@ jobs:
           windeployqt --release --no-compiler-runtime "dist/package/$appName.exe"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Copy-Item LICENSE dist/package/
+          Copy-Item third_party/rtmidi/LICENSE dist/package/RTMIDI-LICENSE.txt
           $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "x64") -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
           if (!$crt) { throw "The Visual C++ runtime DLLs are missing" }
           Copy-Item (Join-Path $crt.FullName "*.dll") dist/package/ -Force
@@ -208,7 +210,7 @@ jobs:
       - name: System packages
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git curl file build-essential cmake ninja-build python3 libgl1-mesa-dev \
+          apt-get install -y --no-install-recommends ca-certificates git curl file build-essential cmake ninja-build python3 libgl1-mesa-dev libasound2-dev \
             qt6-base-dev qmake6 qt6-websockets-dev libqt6websockets6 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfuse2 desktop-file-utils
       - uses: actions/checkout@v4
