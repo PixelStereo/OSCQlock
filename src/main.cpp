@@ -277,12 +277,27 @@ int selfTest()
     dimmer.max = pxs::core::device::nativeMaximum(fixture.kind, dimmer);
     fixture.addresses.push_back(dimmer);
     const auto fixtureId = destinations.manager().add(fixture);
-    const bool scaled = fixtureId
-        && destinations.send(fixtureId, "/dimmer", 1, true)
-        && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255
-        && destinations.send(fixtureId, "/dimmer", 1)
+    const bool direct = fixtureId
+        && destinations.sendNative(fixtureId, "/dimmer", 1)
         && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 1;
-    if (!scaled) std::fprintf(stderr, "OSCQlock: DMX native or normalized output did not encode correctly\n");
+    QJsonObject legacy = device.show();
+    auto legacyTimelines = legacy.value("timelines").toArray();
+    auto firstTimeline = legacyTimelines.first().toObject();
+    firstTimeline["tracks"] = QJsonArray{QJsonObject{{"holder", double(fixtureId)}, {"path", "/dimmer"},
+        {"normalized_output", true}, {"keys", QJsonArray{QJsonArray{0, 1}}}}};
+    legacyTimelines[0] = firstTimeline;
+    legacy["timelines"] = legacyTimelines;
+    legacy["version"] = 2;
+    const bool loadedLegacy = device.loadShow(legacy);
+    const auto &migrated = device.timelines().front().anim.tracks.front();
+    const auto filters = Interaction::filtersFromJson(QJsonObject{{"filters", migrated.dataFilters}});
+    QEventLoop output;
+    QTimer::singleShot(50, &output, &QEventLoop::quit);
+    output.exec();
+    const bool scaled = direct && loadedLegacy && migrated.unitCurve && filters.size() == 1 &&
+        filters.front() == InteractionStage::remap(0, 1, 0, 255) &&
+        destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255;
+    if (!scaled) std::fprintf(stderr, "OSCQlock: raw DMX output or legacy Remap migration failed\n");
 
     device.tree().removeObserver(watching);
     feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled;

@@ -14,7 +14,7 @@
 namespace show {
 
 namespace {
-constexpr int kVersion = 2;
+constexpr int kVersion = 3;
 }
 
 bool save(const QString &path, const Device &device, const Destinations &destinations, QString *error)

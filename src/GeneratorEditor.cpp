@@ -4,8 +4,6 @@
 #include "Destinations.h"
 
 #include <QCheckBox>
-#include <QComboBox>
-#include <QSignalBlocker>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -70,19 +68,9 @@ protected:
         g->addWidget(m_on, 0, 0);
         g->addWidget(m_target, 0, 1, 1, 2);
         g->addWidget(del, 0, 3);
-        m_units = new QComboBox;
-        m_units->addItems({QStringLiteral("Device units"), QStringLiteral("Normalized 0–1")});
-        m_units->setToolTip(QStringLiteral("Units of the existing curve values. Changing units reinterprets the curve."));
-        g->addWidget(m_units, 1, 1, 1, 3);
-        connect(m_units, &QComboBox::currentIndexChanged, this, [this](int index) {
-            if (m_filling) return;
-            track().normalizedOutput = index == 1;
-            showOutput();
-            changed();
-        });
         m_output = new QLabel;
         m_output->setWordWrap(true);
-        g->addWidget(m_output, 2, 1, 1, 3);
+        g->addWidget(m_output, 1, 1, 1, 3);
         connect(m_on, &QCheckBox::toggled, this, [this](bool on) {
             if (m_filling) return;
             track().enabled = on;
@@ -103,11 +91,6 @@ private:
         const auto *device = destinations ? destinations->find(target.layer) : nullptr;
         using pxs::devices::Kind;
         const auto *address = destinations ? destinations->scaledAddress(target.layer, target.param) : nullptr;
-        m_units->setVisible(address != nullptr);
-        if (address) {
-            const QSignalBlocker block(m_units);
-            m_units->setCurrentIndex(target.normalizedOutput ? 1 : 0);
-        }
         m_output->setVisible(address != nullptr);
         if (!address) return;
         QString route, wire;
@@ -136,13 +119,11 @@ private:
                 else if (message.size() >= 3) wire = QString::number(message[2]);
             }
         }
-        const QString range = target.normalizedOutput ? QStringLiteral("0–1")
-            : QStringLiteral("%1–%2").arg(QString::number(address->min), QString::number(address->max));
         const QString encoded = device->kind == Kind::Midi && address->message == pxs::core::midi::Kind::ProgramChange
             ? QStringLiteral("Program %1").arg(address->number) : QStringLiteral("0–%1").arg(maximum);
-        const QString summary = QStringLiteral("%1\n%2 → %3 · Out %4").arg(route, range, encoded, wire);
+        const QString summary = QStringLiteral("%1\nOut %2 · %3").arg(route, wire, encoded);
         if (m_output->text() != summary) m_output->setText(summary);
-        m_output->setToolTip(QStringLiteral("Track input → protocol range. Out is the encoded device value, before transport."));
+        m_output->setToolTip(QStringLiteral("Out shows the encoded value after the track's filters."));
     }
 
     void fillMenu()
@@ -160,7 +141,7 @@ private:
         for (const pxs::devices::Device *dest : all) {
             const QString kind = QString::fromLatin1(pxs::core::device::name(dest->kind));
             QMenu *sub = menu->addMenu(QStringLiteral("%1   (%2%3)").arg(QString::fromStdString(dest->name), kind, d->online(dest->id) ? QString() : QStringLiteral(", offline")));
-            const std::vector<ParamInfo> params = d->params(dest->id);
+            const std::vector<ParamInfo> params = d->manager().params(dest->id, true);
             if (params.empty()) {
                 sub->addAction(dest->kind == pxs::devices::Kind::Osc ? QStringLiteral("No address: declare them in Devices…")
                                                                     : QStringLiteral("Nothing to drive (its namespace is not read yet)"))
@@ -185,16 +166,7 @@ private:
         t.axes.clear();
         double v = 0.5;
         m_host->animParamValue(holder, path, &v);
-        const auto *destinations = m_tl->device()->destinations();
-        const auto *address = destinations ? destinations->scaledAddress(holder, path) : nullptr;
-        t.normalizedOutput = address != nullptr;
-        if (address) {
-            v = pxs::core::device::unit(*address, v);
-            t.center = 0.5;
-            t.amplitude = 0.5;
-        } else {
-            m_host->waveAround(holder, path, &t.center, &t.amplitude);
-        }
+        m_host->waveAround(holder, path, &t.center, &t.amplitude);
         t.keys = {AnimKey{0, v, 3}};
         fill();
         changed();
@@ -203,7 +175,6 @@ private:
     TimelineEditor *m_tl;
     QCheckBox *m_on = nullptr;
     QLabel *m_output = nullptr;
-    QComboBox *m_units = nullptr;
     QPushButton *m_target = nullptr;
 };
 

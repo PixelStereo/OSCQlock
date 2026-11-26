@@ -403,6 +403,7 @@ void Device::setDestinations(Destinations *destinations)
 {
     if (m_destinations) disconnect(m_destinations, nullptr, this, nullptr);
     m_destinations = destinations;
+    migrateTimelineOutputs();
     rebuildPresetTargets();
     migratePresetAddresses();
     for (Timeline &t : m_timelines) buildTracks(t);
@@ -546,7 +547,7 @@ AnimationPlayback Device::playback(quint64 id) const
 
 std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
 {
-    if (holder && m_destinations) return m_destinations->params(holder);
+    if (holder && m_destinations) return m_destinations->manager().params(holder, true);
     ::ParamInfo p;
     p.path = "output";
     p.label = "Output (its own signal, /generator/<timeline>/tracks/<n>)";
@@ -560,7 +561,7 @@ std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
 
 bool Device::animParamValue(quint64 holder, const QString &path, double *value) const
 {
-    if (holder) return m_destinations && m_destinations->value(holder, path, value);
+    if (holder) return m_destinations && m_destinations->manager().nativeValue(holder, path, value);
     if (path != "output") return false;
     *value = 0.5;
     return true;
@@ -719,7 +720,7 @@ QJsonArray Device::timelinesJson() const
     return list;
 }
 
-void Device::readTimelines(const QJsonArray &list)
+void Device::readTimelines(const QJsonArray &list, bool legacyOutput)
 {
     for (const QJsonValue &v : list) {
         const QJsonObject o = v.toObject();
@@ -735,12 +736,38 @@ void Device::readTimelines(const QJsonArray &list)
             track.layer = quint64(j.value("holder").toDouble());
             track.param = j.value("path").toString();
             track.enabled = j.value("enabled").toBool(true);
+            if (legacyOutput) t.legacyNormalized.push_back(j.value("normalized_output").toBool());
             t.anim.tracks.push_back(track);
         }
         t.slug = slugOf(t.anim.id);
         m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
         m_timelines.push_back(std::move(t));
         buildTimeline(m_timelines.back());
+    }
+}
+
+void Device::migrateTimelineOutputs()
+{
+    if (!m_destinations) return;
+    for (auto &timeline : m_timelines) {
+        for (size_t i = 0; i < timeline.legacyNormalized.size(); ++i) {
+            auto &track = timeline.anim.tracks[i];
+            const auto *address = m_destinations->scaledAddress(track.layer, track.param);
+            if (!address) continue;
+            const auto kind = m_destinations->find(track.layer)->kind;
+            const double outMax = pxs::core::device::nativeMaximum(kind, *address);
+            const bool normalized = timeline.legacyNormalized[i];
+            const double inputMin = normalized ? 0 : address->min;
+            const double inputMax = normalized ? 1 : address->max;
+            track.unitCurve = normalized;
+            if (inputMin == 0 && inputMax == outMax) continue;
+            // Invalid legacy ranges produced zero, independent of the curve.
+            appendTrackRemap(track, inputMin, inputMax, 0, address->max > address->min ? outMax : 0);
+        }
+        if (!timeline.legacyNormalized.empty()) {
+            timeline.legacyNormalized.clear();
+            save();
+        }
     }
 }
 
@@ -933,7 +960,8 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     m_timelines.clear();
     m_filters.clear();
     m_sequencer.stopAll();
-    readTimelines(show.value("timelines").toArray());
+    readTimelines(show.value("timelines").toArray(), show.value("version").toInt() < 3);
+    migrateTimelineOutputs();
     if (m_timelines.empty()) addTimeline();
     s.shown = show.value("shown").toString().toStdString();
     readSequence(show);
@@ -982,6 +1010,7 @@ void Device::writeSettings()
 {
     if (!m_persistent) return;
     QSettings settings;
+    settings.setValue(QStringLiteral("timelineNativeOutput"), true);
     settings.setValue(QStringLiteral("timelines"), QJsonDocument(timelinesJson()).toJson(QJsonDocument::Compact));
     settings.setValue(QStringLiteral("sequences"), QJsonDocument(m_sequencer.toJson()).toJson(QJsonDocument::Compact));
     settings.setValue(QStringLiteral("presets"), QJsonDocument(presetsJson()).toJson(QJsonDocument::Compact));
@@ -992,7 +1021,8 @@ void Device::writeSettings()
 void Device::load()
 {
     QSettings settings;
-    readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array());
+    readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array(),
+                  !settings.value(QStringLiteral("timelineNativeOutput")).toBool());
     QJsonObject kept;
     if (settings.contains(QStringLiteral("sequences")))
         kept["sequences"] = QJsonDocument::fromJson(settings.value(QStringLiteral("sequences")).toByteArray()).array();
@@ -1057,7 +1087,7 @@ void Device::tick()
             if (!std::isfinite(v)) continue;
             t.values[i] = v;
             m_tree.fire(b + "/tracks/" + std::to_string(i + 1), {Value(float(v))});
-            if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v, track.normalizedOutput);
+            if (track.layer && m_destinations) m_destinations->sendNative(track.layer, track.param, v);
         }
         m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});
         m_tree.fire(b + "/signals/seconds", {Value(t.anim.played())});

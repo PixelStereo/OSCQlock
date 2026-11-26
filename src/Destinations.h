@@ -34,7 +34,8 @@ public:
     auto params(quint64 id) const { return m_devices.params(id); }
     bool value(quint64 id, const QString &path, double *v) const { return m_devices.value(id, path, v); }
     const pxs::devices::Address *scaledAddress(quint64 id, const QString &path) const;
-    bool send(quint64 id, const QString &path, double v, bool normalized = false);
+    bool sendNative(quint64 id, const QString &path, double v) { return m_devices.sendNative(id, path, v); }
+    bool send(quint64 id, const QString &path, double v) { return m_devices.send(id, path, v); }
     int sent() const { return m_devices.sent(); }
 
     QJsonArray showJson() const;
