@@ -4,6 +4,8 @@
 #include "Destinations.h"
 
 #include <QCheckBox>
+#include <QComboBox>
+#include <QSignalBlocker>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -31,6 +33,12 @@ class TargetRow : public TrackRow
 public:
     TargetRow(TimelineEditor *editor, int index) : TrackRow(editor, index), m_tl(editor) {}
 
+    void setLive(double captured, const std::array<double, 3> &rgb, const std::array<double, 2> &xy, bool running) override
+    {
+        TrackRow::setLive(captured, rgb, xy, running);
+        showOutput();
+    }
+
     void fill() override
     {
         m_filling = true;
@@ -42,7 +50,7 @@ public:
         if (dest && !d->online(dest->id)) where += QStringLiteral(" (offline)");
         m_target->setText(t.param.isEmpty() ? QStringLiteral("(choose what it drives)")
                                             : QStringLiteral("%1  ›  %2").arg(where, t.layer == 0 ? QStringLiteral("Output") : t.param));
-        showDmxOutput();
+        showOutput();
         m_filling = false;
         TrackRow::fill();
     }
@@ -62,11 +70,19 @@ protected:
         g->addWidget(m_on, 0, 0);
         g->addWidget(m_target, 0, 1, 1, 2);
         g->addWidget(del, 0, 3);
-        m_dmxOutput = new QLabel;
-        m_dmxOutput->setWordWrap(true);
-        g->addWidget(m_dmxOutput, 1, 1, 1, 3);
-        if (auto *destinations = m_tl->device()->destinations())
-            connect(&destinations->manager(), &pxs::devices::Devices::dmxChanged, this, [this] { showDmxOutput(); });
+        m_units = new QComboBox;
+        m_units->addItems({QStringLiteral("Device units"), QStringLiteral("Normalized 0–1")});
+        m_units->setToolTip(QStringLiteral("Units of the existing curve values. Changing units reinterprets the curve."));
+        g->addWidget(m_units, 1, 1, 1, 3);
+        connect(m_units, &QComboBox::currentIndexChanged, this, [this](int index) {
+            if (m_filling) return;
+            track().normalizedOutput = index == 1;
+            showOutput();
+            changed();
+        });
+        m_output = new QLabel;
+        m_output->setWordWrap(true);
+        g->addWidget(m_output, 2, 1, 1, 3);
         connect(m_on, &QCheckBox::toggled, this, [this](bool on) {
             if (m_filling) return;
             track().enabled = on;
@@ -79,27 +95,54 @@ protected:
     }
 
 private:
-    void showDmxOutput()
+    void showOutput()
     {
-        if (!m_dmxOutput) return;
+        if (!m_output) return;
         const auto &target = track();
         const auto *destinations = m_tl->device()->destinations();
         const auto *device = destinations ? destinations->find(target.layer) : nullptr;
-        const auto *address = device && device->kind == pxs::devices::Kind::Dmx
-            ? device->address(target.param.toStdString()) : nullptr;
-        m_dmxOutput->setVisible(address != nullptr);
+        using pxs::devices::Kind;
+        const auto *address = destinations ? destinations->scaledAddress(target.layer, target.param) : nullptr;
+        m_units->setVisible(address != nullptr);
+        if (address) {
+            const QSignalBlocker block(m_units);
+            m_units->setCurrentIndex(target.normalizedOutput ? 1 : 0);
+        }
+        m_output->setVisible(address != nullptr);
         if (!address) return;
-        const auto [channel, width] = pxs::core::device::dmxChannels(*device, *address);
-        const auto level = destinations->manager().dmxLevel(target.layer, target.param);
-        const QString patch = !channel ? QStringLiteral("Invalid DMX patch")
-            : width == 2 ? QStringLiteral("U%1 ch %2–%3").arg(device->universe).arg(channel).arg(channel + 1)
-                         : QStringLiteral("U%1 ch %2").arg(device->universe).arg(channel);
-        m_dmxOutput->setText(QStringLiteral("%1 · %2–%3 → 0–%4 · DMX %5")
-            .arg(patch, QString::number(address->min), QString::number(address->max))
-            .arg(address->fine ? 65535 : 255)
-            .arg(level ? QString::number(*level) : QStringLiteral("—")));
-        m_dmxOutput->setToolTip(QStringLiteral("Track values are clamped to the input range and scaled to the DMX range. "
-                                               "The final value is read from the output universe buffer."));
+        QString route, wire;
+        const int maximum = pxs::core::device::nativeMaximum(device->kind, *address);
+        if (device->kind == Kind::Dmx) {
+            const auto [channel, width] = pxs::core::device::dmxChannels(*device, *address);
+            const auto level = destinations->manager().dmxLevel(target.layer, target.param);
+            route = !channel ? QStringLiteral("Invalid DMX patch")
+                : width == 2 ? QStringLiteral("DMX U%1 ch %2–%3").arg(device->universe).arg(channel).arg(channel + 1)
+                             : QStringLiteral("DMX U%1 ch %2").arg(device->universe).arg(channel);
+            wire = level ? QString::number(*level) : QStringLiteral("—");
+        } else {
+            using pxs::core::midi::Kind;
+            const auto message = destinations->manager().midiOutput(target.layer, target.param);
+            const auto channel = QStringLiteral("MIDI ch %1 · ").arg(device->midiChannel);
+            switch (address->message) {
+            case Kind::ControlChange: route = channel + QStringLiteral("CC %1").arg(address->number); break;
+            case Kind::Note: route = channel + QStringLiteral("Note %1").arg(address->number); break;
+            case Kind::PitchBend: route = channel + QStringLiteral("Pitch bend"); break;
+            case Kind::ProgramChange: route = channel + QStringLiteral("Program Change"); break;
+            }
+            wire = QStringLiteral("—");
+            if (message.size() >= 2) {
+                if (address->message == Kind::PitchBend && message.size() >= 3) wire = QString::number(int(message[1]) | (int(message[2]) << 7));
+                else if (address->message == Kind::ProgramChange) wire = QString::number(message[1]);
+                else if (message.size() >= 3) wire = QString::number(message[2]);
+            }
+        }
+        const QString range = target.normalizedOutput ? QStringLiteral("0–1")
+            : QStringLiteral("%1–%2").arg(QString::number(address->min), QString::number(address->max));
+        const QString encoded = device->kind == Kind::Midi && address->message == pxs::core::midi::Kind::ProgramChange
+            ? QStringLiteral("Program %1").arg(address->number) : QStringLiteral("0–%1").arg(maximum);
+        const QString summary = QStringLiteral("%1\n%2 → %3 · Out %4").arg(route, range, encoded, wire);
+        if (m_output->text() != summary) m_output->setText(summary);
+        m_output->setToolTip(QStringLiteral("Track input → protocol range. Out is the encoded device value, before transport."));
     }
 
     void fillMenu()
@@ -142,15 +185,25 @@ private:
         t.axes.clear();
         double v = 0.5;
         m_host->animParamValue(holder, path, &v);
+        const auto *destinations = m_tl->device()->destinations();
+        const auto *address = destinations ? destinations->scaledAddress(holder, path) : nullptr;
+        t.normalizedOutput = address != nullptr;
+        if (address) {
+            v = pxs::core::device::unit(*address, v);
+            t.center = 0.5;
+            t.amplitude = 0.5;
+        } else {
+            m_host->waveAround(holder, path, &t.center, &t.amplitude);
+        }
         t.keys = {AnimKey{0, v, 3}};
-        m_host->waveAround(holder, path, &t.center, &t.amplitude);
         fill();
         changed();
     }
 
     TimelineEditor *m_tl;
     QCheckBox *m_on = nullptr;
-    QLabel *m_dmxOutput = nullptr;
+    QLabel *m_output = nullptr;
+    QComboBox *m_units = nullptr;
     QPushButton *m_target = nullptr;
 };
 
@@ -243,6 +296,13 @@ void TimelineEditor::store(const Animation &before, const Animation &after, cons
 void TimelineEditor::control(AnimAction action, double time)
 {
     m_device->control(m_id, action, time);
+}
+
+QString TimelineEditor::trackLabel(const AnimTrack &track) const
+{
+    const auto *destinations = m_device->destinations();
+    const auto name = track.layer && destinations ? destinations->nameOf(track.layer) : QStringLiteral("OSCQlock");
+    return QStringLiteral("%1 › %2").arg(name, track.param);
 }
 
 TrackRow *TimelineEditor::makeRow(int index) { return new TargetRow(this, index); }

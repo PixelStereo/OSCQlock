@@ -4,6 +4,7 @@
 #include <QHostInfo>
 #include <QNetworkInterface>
 #include <set>
+#include <algorithm>
 #include <QScopedValueRollback>
 #include <QSettings>
 
@@ -84,6 +85,21 @@ bool Destinations::isLocalService(const pxs::devices::Device &device) const
     return address.isLoopback() || QNetworkInterface::allAddresses().contains(address)
         || host.compare(QStringLiteral("localhost"), Qt::CaseInsensitive) == 0
         || host.compare(QHostInfo::localHostName(), Qt::CaseInsensitive) == 0;
+}
+
+const pxs::devices::Address *Destinations::scaledAddress(quint64 id, const QString &path) const
+{
+    const auto *device = find(id);
+    if (!device || (device->kind != Kind::Dmx && device->kind != Kind::Midi)) return nullptr;
+    return device->address(path.toStdString());
+}
+
+bool Destinations::send(quint64 id, const QString &path, double value, bool normalized)
+{
+    if (normalized)
+        if (const auto *address = scaledAddress(id, path))
+            value = address->min + std::clamp(value, 0.0, 1.0) * (address->max - address->min);
+    return m_devices.send(id, path, value);
 }
 
 quint64 Destinations::addOsc(const QString &name, const QString &host, quint16 port)

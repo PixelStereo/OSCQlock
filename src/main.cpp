@@ -17,6 +17,8 @@
 #include <QSplitter>
 #include <QTcpServer>
 #include <QStackedWidget>
+#include <QMenuBar>
+#include <QMenu>
 #include <QPointer>
 #include <QFormLayout>
 #include <QScrollArea>
@@ -267,8 +269,23 @@ int selfTest()
         && device.tree().find(address)->get().front().number() == 0.75;
     if (!timed) std::fprintf(stderr, "OSCQlock: preset capture or step override failed\n");
 
+    pxs::devices::Device fixture;
+    fixture.kind = pxs::devices::Kind::Dmx;
+    fixture.name = "Output test";
+    pxs::devices::Address dimmer;
+    dimmer.path = "/dimmer";
+    dimmer.max = pxs::core::device::nativeMaximum(fixture.kind, dimmer);
+    fixture.addresses.push_back(dimmer);
+    const auto fixtureId = destinations.manager().add(fixture);
+    const bool scaled = fixtureId
+        && destinations.send(fixtureId, "/dimmer", 1, true)
+        && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255
+        && destinations.send(fixtureId, "/dimmer", 1)
+        && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 1;
+    if (!scaled) std::fprintf(stderr, "OSCQlock: DMX native or normalized output did not encode correctly\n");
+
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried && cued && shown && undone && timed;
+    feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled;
 
     const auto *tab = device.tree().find("/ui/tab");
     const bool renamed = tab && device.tree().apply("/ui/tab", {Value("generator")}) == 1
@@ -369,23 +386,17 @@ int main(int argc, char **argv)
         // The show: its file, opened and saved (what is done is kept between launches anyway)
         auto *showName = new QLabel;
         showName->setStyleSheet(QStringLiteral("color: #c8ccd4;"));
-        auto *openButton = new QPushButton(QStringLiteral("Open…"));
-        auto *saveButton = new QPushButton(QStringLiteral("Save"));
-        auto *saveAsButton = new QPushButton(QStringLiteral("Save as…"));
-        openButton->setToolTip(QStringLiteral("Open a show (.oscqlock): its timelines, its sequence, its devices"));
-        saveButton->setToolTip(QStringLiteral("Save the show in its file (Cmd/Ctrl+S)"));
-        saveButton->setShortcut(QKeySequence::Save);
-        openButton->setShortcut(QKeySequence::Open);
-        auto *undoButton = new QPushButton(QStringLiteral("Undo"));
-        auto *redoButton = new QPushButton(QStringLiteral("Redo"));
-        for (QPushButton *b : {undoButton, redoButton}) b->setEnabled(false);
-        header->addWidget(undoButton);
-        header->addWidget(redoButton);
-        header->addSpacing(8);
+        auto *menus = new QMenuBar(&window);
+        root->setMenuBar(menus);
+        auto *fileMenu = menus->addMenu(QStringLiteral("&File"));
+        auto *openAction = fileMenu->addAction(QStringLiteral("&Open…"));
+        auto *saveAction = fileMenu->addAction(QStringLiteral("&Save"));
+        auto *saveAsAction = fileMenu->addAction(QStringLiteral("Save &As…"));
+        openAction->setShortcut(QKeySequence::Open);
+        saveAction->setShortcut(QKeySequence::Save);
+        saveAsAction->setShortcut(QKeySequence::SaveAs);
+        auto *editMenu = menus->addMenu(QStringLiteral("&Edit"));
         header->addWidget(showName);
-        header->addWidget(openButton);
-        header->addWidget(saveButton);
-        header->addWidget(saveAsButton);
         header->addSpacing(10);
         auto *devicesButton = new QPushButton;
         devicesButton->setObjectName(QStringLiteral("accent"));
@@ -587,9 +598,9 @@ int main(int argc, char **argv)
             device.setSaved();
             title();
         };
-        QObject::connect(saveButton, &QPushButton::clicked, &window, [saveTo, showPath] { saveTo(*showPath); });
-        QObject::connect(saveAsButton, &QPushButton::clicked, &window, [saveTo] { saveTo(QString()); });
-        QObject::connect(openButton, &QPushButton::clicked, &window, [&window, &device, &destinations, showPath, title, saveTo, undo] {
+        QObject::connect(saveAction, &QAction::triggered, &window, [saveTo, showPath] { saveTo(*showPath); });
+        QObject::connect(saveAsAction, &QAction::triggered, &window, [saveTo] { saveTo(QString()); });
+        QObject::connect(openAction, &QAction::triggered, &window, [&window, &device, &destinations, showPath, title, saveTo, undo] {
             // What would be replaced and is not in a file: saved first, or let go, or nothing opened
             if (device.modified()) {
                 const auto answer = QMessageBox::question(&window, QStringLiteral("Open a show"),
@@ -624,18 +635,8 @@ int main(int argc, char **argv)
         QAction *redoAction = undo->createRedoAction(&window, QStringLiteral("Redo"));
         undoAction->setShortcut(QKeySequence::Undo);
         redoAction->setShortcut(QKeySequence::Redo);
-        window.addAction(undoAction);
-        window.addAction(redoAction);
-        QObject::connect(undoButton, &QPushButton::clicked, undoAction, &QAction::trigger);
-        QObject::connect(redoButton, &QPushButton::clicked, redoAction, &QAction::trigger);
-        QObject::connect(undoAction, &QAction::changed, undoButton, [undoButton, undoAction] {
-            undoButton->setEnabled(undoAction->isEnabled());
-            undoButton->setToolTip(undoAction->text() + QStringLiteral("  (") + QKeySequence(QKeySequence::Undo).toString(QKeySequence::NativeText) + ')');
-        });
-        QObject::connect(redoAction, &QAction::changed, redoButton, [redoButton, redoAction] {
-            redoButton->setEnabled(redoAction->isEnabled());
-            redoButton->setToolTip(redoAction->text() + QStringLiteral("  (") + QKeySequence(QKeySequence::Redo).toString(QKeySequence::NativeText) + ')');
-        });
+        editMenu->addAction(undoAction);
+        editMenu->addAction(redoAction);
 
         window.resize(1480, 860);
         const auto focusSection = [generator, sequence, presetView](const pxs::core::tree::Node &node, const auto &) {

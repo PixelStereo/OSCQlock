@@ -26,6 +26,7 @@ protected:
     bool fetch(Animation *a) const override;
     void store(const Animation &before, const Animation &after, const QString &text, const QString &mergeKey) override;
     void control(AnimAction action, double time) override;
+    QString trackLabel(const AnimTrack &track) const override;
     pxs::timelineview::TrackRow *makeRow(int index) override;
 
 private:

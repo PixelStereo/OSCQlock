@@ -33,7 +33,8 @@ public:
     void setAddresses(quint64 id, const std::vector<OscAddress> &addresses);
     auto params(quint64 id) const { return m_devices.params(id); }
     bool value(quint64 id, const QString &path, double *v) const { return m_devices.value(id, path, v); }
-    bool send(quint64 id, const QString &path, double v) { return m_devices.send(id, path, v); }
+    const pxs::devices::Address *scaledAddress(quint64 id, const QString &path) const;
+    bool send(quint64 id, const QString &path, double v, bool normalized = false);
     int sent() const { return m_devices.sent(); }
 
     QJsonArray showJson() const;

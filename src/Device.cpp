@@ -1057,7 +1057,7 @@ void Device::tick()
             if (!std::isfinite(v)) continue;
             t.values[i] = v;
             m_tree.fire(b + "/tracks/" + std::to_string(i + 1), {Value(float(v))});
-            if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v);
+            if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v, track.normalizedOutput);
         }
         m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});
         m_tree.fire(b + "/signals/seconds", {Value(t.anim.played())});
