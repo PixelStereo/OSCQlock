@@ -1,4 +1,5 @@
 #include "Device.h"
+#include "Show.h"
 
 #include <pxs/core/tree/parameter.h>
 
@@ -403,13 +404,10 @@ void Device::setDestinations(Destinations *destinations)
 {
     if (m_destinations) disconnect(m_destinations, nullptr, this, nullptr);
     m_destinations = destinations;
-    migrateTimelineOutputs();
     rebuildPresetTargets();
-    migratePresetAddresses();
     for (Timeline &t : m_timelines) buildTracks(t);
     if (destinations) connect(destinations, &Destinations::changed, this, [this] {
         rebuildPresetTargets();
-        migratePresetAddresses();
         m_stale = true;
     }); // a device made, edited: the show too
 }
@@ -547,7 +545,7 @@ AnimationPlayback Device::playback(quint64 id) const
 
 std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
 {
-    if (holder && m_destinations) return m_destinations->manager().params(holder, true);
+    if (holder && m_destinations) return m_destinations->params(holder);
     ::ParamInfo p;
     p.path = "output";
     p.label = "Output (its own signal, /generator/<timeline>/tracks/<n>)";
@@ -561,7 +559,7 @@ std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
 
 bool Device::animParamValue(quint64 holder, const QString &path, double *value) const
 {
-    if (holder) return m_destinations && m_destinations->manager().nativeValue(holder, path, value);
+    if (holder) return m_destinations && m_destinations->value(holder, path, value);
     if (path != "output") return false;
     *value = 0.5;
     return true;
@@ -720,7 +718,7 @@ QJsonArray Device::timelinesJson() const
     return list;
 }
 
-void Device::readTimelines(const QJsonArray &list, bool legacyOutput)
+void Device::readTimelines(const QJsonArray &list)
 {
     for (const QJsonValue &v : list) {
         const QJsonObject o = v.toObject();
@@ -736,7 +734,6 @@ void Device::readTimelines(const QJsonArray &list, bool legacyOutput)
             track.layer = quint64(j.value("holder").toDouble());
             track.param = j.value("path").toString();
             track.enabled = j.value("enabled").toBool(true);
-            if (legacyOutput) t.legacyNormalized.push_back(j.value("normalized_output").toBool());
             t.anim.tracks.push_back(track);
         }
         t.slug = slugOf(t.anim.id);
@@ -746,65 +743,10 @@ void Device::readTimelines(const QJsonArray &list, bool legacyOutput)
     }
 }
 
-void Device::migrateTimelineOutputs()
-{
-    if (!m_destinations) return;
-    for (auto &timeline : m_timelines) {
-        for (size_t i = 0; i < timeline.legacyNormalized.size(); ++i) {
-            auto &track = timeline.anim.tracks[i];
-            const auto *address = m_destinations->scaledAddress(track.layer, track.param);
-            if (!address) continue;
-            const auto kind = m_destinations->find(track.layer)->kind;
-            const double outMax = pxs::core::device::nativeMaximum(kind, *address);
-            const bool normalized = timeline.legacyNormalized[i];
-            const double inputMin = normalized ? 0 : address->min;
-            const double inputMax = normalized ? 1 : address->max;
-            track.unitCurve = normalized;
-            if (inputMin == 0 && inputMax == outMax) continue;
-            // Invalid legacy ranges produced zero, independent of the curve.
-            appendTrackRemap(track, inputMin, inputMax, 0, address->max > address->min ? outMax : 0);
-        }
-        if (!timeline.legacyNormalized.empty()) {
-            timeline.legacyNormalized.clear();
-            save();
-        }
-    }
-}
 
 void Device::readSequence(const QJsonObject &o)
 {
-    if (o.value("sequences").isArray()) {
-        m_sequencer.fromJson(o.value("sequences").toArray(), std::max(0, o.value("sequence").toInt()));
-    } else {
-        // An OSCQlock before NyxMap's sequencer kept "cues": each one a step (start: rewind then play; stop all: every timeline stopped)
-        m_sequencer.clear();
-        Sequencer::Sequence seq;
-        seq.name = QStringLiteral("Sequence 1");
-        for (const QJsonValue &v : o.value("cues").toArray()) {
-            const QJsonObject c = v.toObject();
-            Sequencer::Step st;
-            st.description = c.value("name").toString();
-            st.preWait = std::max(0.0, c.value("wait").toDouble());
-            st.next = c.value("continue").toBool() ? Sequencer::StepContinue::AutoFollow : Sequencer::StepContinue::Wait;
-            const quint64 timeline = quint64(c.value("timeline").toDouble());
-            const QString action = c.value("action").toString();
-            const auto act = [](quint64 id, AnimAction a) {
-                Sequencer::Step x;
-                x.timeline = id;
-                x.action = a;
-                return x;
-            };
-            if (action == QLatin1String("start")) st.actions = {act(timeline, AnimAction::Rewind), act(timeline, AnimAction::Play)};
-            else if (action == QLatin1String("stop_all"))
-                for (const Timeline &t : m_timelines) st.actions.push_back(act(t.anim.id, AnimAction::Stop));
-            else {
-                st.timeline = timeline;
-                st.action = action == QLatin1String("pause") ? AnimAction::Pause : action == QLatin1String("stop") ? AnimAction::Stop : AnimAction::Play;
-            }
-            seq.steps.push_back(st);
-        }
-        m_sequencer.add(seq);
-    }
+    m_sequencer.fromJson(o.value("sequences").toArray(), std::max(0, o.value("sequence").toInt()));
     if (m_sequencer.count() == 0) {
         Sequencer::Sequence first;
         first.name = QStringLiteral("Sequence 1");
@@ -838,71 +780,11 @@ void Device::readPresets(const QJsonArray &presets)
     m_presets.clear();
     for (const auto &value : presets) {
         auto preset = pxs::core::tree::Preset::fromJson(value.toString().toStdString());
-        if (preset.id.empty()) preset.id = std::to_string(m_presets.size() + 1);
+        if (preset.id.empty()) continue;
         m_presets.push_back(std::move(preset));
     }
 }
 
-void Device::migratePresetAddresses()
-{
-    if (!m_destinations) return;
-    const auto updateAddress = [this](const std::string &path) -> std::string {
-        if (path.rfind("/devices/", 0) != 0) return path;
-        const auto end = path.find('/', 9);
-        const auto segment = path.substr(9, end - 9);
-        const auto suffix = end == std::string::npos ? std::string{} : path.substr(end);
-        const auto legacy = QString::fromStdString(segment).toULongLong();
-        const auto id = legacy ? legacy : m_destinations->presetDevice(path);
-        const auto *target = m_destinations->find(id);
-        if (target && m_destinations->isLocalService(*target)) return {};
-        if ((suffix == "/devices" || suffix.rfind("/devices/", 0) == 0) &&
-            (legacy || (target && target->kind == pxs::devices::Kind::OscQuery))) return {};
-        const auto alias = legacy ? m_destinations->presetPath(legacy) : std::string{};
-        return alias.empty() ? path : alias + suffix;
-    };
-    const auto updatePreset = [&](auto &preset) {
-        bool changed = false;
-        const auto keys = [&](auto &entries) {
-            for (auto it = entries.begin(); it != entries.end();) {
-                const auto path = updateAddress(it->first);
-                if (path == it->first) { ++it; continue; }
-                if (!path.empty()) entries.try_emplace(path, std::move(it->second));
-                it = entries.erase(it);
-                changed = true;
-            }
-        };
-        keys(preset.values);
-        keys(preset.times);
-        keys(preset.delays);
-        keys(preset.curves);
-        for (auto it = preset.actions.begin(); it != preset.actions.end();) {
-            const auto path = updateAddress(it->address);
-            changed |= path != it->address;
-            if (path.empty()) it = preset.actions.erase(it);
-            else {
-                it->address = path;
-                ++it;
-            }
-        }
-        return changed;
-    };
-    bool changed = false;
-    for (auto &preset : m_presets) changed |= updatePreset(preset);
-    for (int i = 0; i < m_sequencer.count(); ++i) {
-        auto sequence = m_sequencer.sequence(i);
-        bool edited = false;
-        const auto visit = [&](const auto &self, Sequencer::Step &step) -> void {
-            if (step.preset) edited |= updatePreset(step.presetOverrides);
-            for (auto &action : step.actions) self(self, action);
-        };
-        for (auto &step : sequence.steps) visit(visit, step);
-        if (edited) m_sequencer.setSequence(i, sequence);
-    }
-    if (changed) {
-        save();
-        tellPresets();
-    }
-}
 
 int Device::indexOfPreset(quint64 id) const
 {
@@ -960,14 +842,12 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     m_timelines.clear();
     m_filters.clear();
     m_sequencer.stopAll();
-    readTimelines(show.value("timelines").toArray(), show.value("version").toInt() < 3);
-    migrateTimelineOutputs();
+    readTimelines(show.value("timelines").toArray());
     if (m_timelines.empty()) addTimeline();
     s.shown = show.value("shown").toString().toStdString();
     readSequence(show);
     m_presetPlayback.clear();
     readPresets(show.value("presets").toArray());
-    migratePresetAddresses();
     timelinesChanged();
     sequenceChanged();
     tellPresets();
@@ -1010,24 +890,19 @@ void Device::writeSettings()
 {
     if (!m_persistent) return;
     QSettings settings;
-    settings.setValue(QStringLiteral("timelineNativeOutput"), true);
+    settings.beginGroup(show::settingsGroup());
     settings.setValue(QStringLiteral("timelines"), QJsonDocument(timelinesJson()).toJson(QJsonDocument::Compact));
     settings.setValue(QStringLiteral("sequences"), QJsonDocument(m_sequencer.toJson()).toJson(QJsonDocument::Compact));
     settings.setValue(QStringLiteral("presets"), QJsonDocument(presetsJson()).toJson(QJsonDocument::Compact));
-    settings.remove(QStringLiteral("cues")); // an OSCQlock before NyxMap's sequencer: read once, then as sequences
     settings.setValue(QStringLiteral("shown"), QString::fromStdString(s.shown));
 }
 
 void Device::load()
 {
     QSettings settings;
-    readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array(),
-                  !settings.value(QStringLiteral("timelineNativeOutput")).toBool());
-    QJsonObject kept;
-    if (settings.contains(QStringLiteral("sequences")))
-        kept["sequences"] = QJsonDocument::fromJson(settings.value(QStringLiteral("sequences")).toByteArray()).array();
-    else
-        kept["cues"] = QJsonDocument::fromJson(settings.value(QStringLiteral("cues")).toByteArray()).array();
+    settings.beginGroup(show::settingsGroup());
+    readTimelines(QJsonDocument::fromJson(settings.value(QStringLiteral("timelines")).toByteArray()).array());
+    QJsonObject kept{{"sequences", QJsonDocument::fromJson(settings.value(QStringLiteral("sequences")).toByteArray()).array()}};
     readPresets(QJsonDocument::fromJson(settings.value(QStringLiteral("presets")).toByteArray()).array());
     readSequence(kept);
     s.shown = settings.value(QStringLiteral("shown")).toString().toStdString();
@@ -1040,10 +915,6 @@ void Device::buildUi()
     group("/ui", "Interface", "What the window shows: the tab and the drawer of the signals are parameters like the others, and move by OSC");
     auto &tab = bound("/ui/tab", "Tab", CoreParameter::Type::Choice, s.tab, [this](CoreParameter &p) { p.choices(m_tabs); });
     tab.description = "The active section of the window";
-    tab.set = [set = std::move(tab.set)](const ValueList &values) {
-        if (values.size() == 1 && values.front().text() == "generator") return set({Value("timelines")});
-        return set(values);
-    };
     auto move = [this](int by) {
         const auto at = std::find(m_tabs.begin(), m_tabs.end(), s.tab);
         const int n = int(m_tabs.size());
@@ -1087,7 +958,7 @@ void Device::tick()
             if (!std::isfinite(v)) continue;
             t.values[i] = v;
             m_tree.fire(b + "/tracks/" + std::to_string(i + 1), {Value(float(v))});
-            if (track.layer && m_destinations) m_destinations->sendNative(track.layer, track.param, v);
+            if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v);
         }
         m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});
         m_tree.fire(b + "/signals/seconds", {Value(t.anim.played())});

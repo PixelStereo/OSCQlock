@@ -274,38 +274,33 @@ int selfTest()
     fixture.name = "Output test";
     pxs::devices::Address dimmer;
     dimmer.path = "/dimmer";
-    dimmer.max = pxs::core::device::nativeMaximum(fixture.kind, dimmer);
     fixture.addresses.push_back(dimmer);
     const auto fixtureId = destinations.manager().add(fixture);
     const bool direct = fixtureId
-        && destinations.sendNative(fixtureId, "/dimmer", 1)
+        && destinations.send(fixtureId, "/dimmer", 1)
         && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 1;
-    QJsonObject legacy = device.show();
-    auto legacyTimelines = legacy.value("timelines").toArray();
-    auto firstTimeline = legacyTimelines.first().toObject();
-    firstTimeline["tracks"] = QJsonArray{QJsonObject{{"holder", double(fixtureId)}, {"path", "/dimmer"},
-        {"normalized_output", true}, {"keys", QJsonArray{QJsonArray{0, 1}}}}};
-    legacyTimelines[0] = firstTimeline;
-    legacy["timelines"] = legacyTimelines;
-    legacy["version"] = 2;
-    const bool loadedLegacy = device.loadShow(legacy);
-    const auto &migrated = device.timelines().front().anim.tracks.front();
-    const auto filters = Interaction::filtersFromJson(QJsonObject{{"filters", migrated.dataFilters}});
+    Animation remapped = device.timelines().front().anim;
+    AnimTrack dimmerTrack;
+    dimmerTrack.layer = fixtureId;
+    dimmerTrack.param = QStringLiteral("/dimmer");
+    dimmerTrack.unitCurve = true;
+    dimmerTrack.keys = {AnimKey{0, 1}};
+    appendTrackRemap(dimmerTrack, 0, 1, 0, 255);
+    remapped.tracks = {dimmerTrack};
+    device.setTimeline(remapped.id, remapped);
     QEventLoop output;
     QTimer::singleShot(50, &output, &QEventLoop::quit);
     output.exec();
-    const bool scaled = direct && loadedLegacy && migrated.unitCurve && filters.size() == 1 &&
-        filters.front() == InteractionStage::remap(0, 1, 0, 255) &&
-        destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255;
-    if (!scaled) std::fprintf(stderr, "OSCQlock: raw DMX output or legacy Remap migration failed\n");
+    const bool scaled = direct && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255;
+    if (!scaled) std::fprintf(stderr, "OSCQlock: raw DMX output or explicit Remap failed\n");
 
     device.tree().removeObserver(watching);
     feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled;
 
     const auto *tab = device.tree().find("/ui/tab");
-    const bool renamed = tab && device.tree().apply("/ui/tab", {Value("generator")}) == 1
+    const bool named = tab && device.tree().apply("/ui/tab", {Value("timelines")}) == 1
         && tab->get().front().text() == "timelines";
-    const bool served = !body.isEmpty() && feedback && renamed;
+    const bool served = !body.isEmpty() && feedback && named;
     std::puts(served && problems.empty() ? "OSCQlock: ok" : "OSCQlock: the tree or the server is not what it must be");
     return served && problems.empty() ? 0 : 1;
 }
@@ -358,10 +353,13 @@ int main(int argc, char **argv)
     Destinations destinations(cli.value(name), service.httpPort(), keep);
     device.setDestinations(&destinations);
     if (!cli.isSet(local)) destinations.startDiscovery();
+    const QString showPathKey = show::settingsGroup() + QStringLiteral("/showPath");
+    QString initialShowPath = keep ? QSettings().value(showPathKey).toString() : QString();
     if (cli.isSet(showOption)) {
         QString why;
         if (show::open(cli.value(showOption), device, destinations, &why)) {
-            if (keep) QSettings().setValue(QStringLiteral("showPath"), QFileInfo(cli.value(showOption)).absoluteFilePath());
+            initialShowPath = QFileInfo(cli.value(showOption)).absoluteFilePath();
+            if (keep) QSettings().setValue(showPathKey, initialShowPath);
         } else {
             qWarning("OSCQlock: the show could not be opened: %s", qPrintable(why));
         }
@@ -399,8 +397,6 @@ int main(int argc, char **argv)
         header->addWidget(pill(QStringLiteral("OSC  udp %1").arg(service.oscPort()), QStringLiteral("What it takes over OSC")));
         header->addStretch(1);
         // The show: its file, opened and saved (what is done is kept between launches anyway)
-        auto *showName = new QLabel;
-        showName->setStyleSheet(QStringLiteral("color: #c8ccd4;"));
         auto *menus = new QMenuBar(&window);
         root->setMenuBar(menus);
         auto *fileMenu = menus->addMenu(QStringLiteral("&File"));
@@ -411,18 +407,7 @@ int main(int argc, char **argv)
         saveAction->setShortcut(QKeySequence::Save);
         saveAsAction->setShortcut(QKeySequence::SaveAs);
         auto *editMenu = menus->addMenu(QStringLiteral("&Edit"));
-        header->addWidget(showName);
         header->addSpacing(10);
-        auto *devicesButton = new QPushButton;
-        devicesButton->setObjectName(QStringLiteral("accent"));
-        devicesButton->setToolTip(QStringLiteral("The devices the tracks can drive: OSCQuery found on the network, plain OSC made here"));
-        const auto countDevices = [devicesButton, &destinations] {
-            devicesButton->setText(QStringLiteral("Devices  ·  %1").arg(destinations.all().size()));
-        };
-        countDevices();
-        QObject::connect(&destinations, &Destinations::changed, devicesButton, countDevices);
-        header->addWidget(devicesButton);
-        header->addSpacing(14);
         left->addLayout(header);
 
         // Undo / redo: what is edited in the window (timelines, the sequence), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
@@ -488,7 +473,12 @@ int main(int argc, char **argv)
         devicesWindow = patch;
         auto *patchPanel = new pxs::devices::DevicesPanel(&destinations.manager());
         patchPanel->setCompactList();
-        patch->addTab(patchPanel, QStringLiteral("Device Manager"));
+        const int devicesTab = patch->addTab(patchPanel, QString());
+        const auto countDevices = [patch, devicesTab, &destinations] {
+            patch->setTabText(devicesTab, QStringLiteral("Device Manager (%1)").arg(destinations.all().size()));
+        };
+        countDevices();
+        QObject::connect(&destinations, &Destinations::changed, patch, countDevices);
         auto *outputs = new pxs::dmx::OutputsPanel;
         outputs->setDefaultSourceName(QStringLiteral("OSCQlock"));
         outputs->setMappingShown(true);
@@ -565,9 +555,6 @@ int main(int argc, char **argv)
         inspection->setMinimumWidth(365);
         editor->setSizes({1050, 400});
         left->addWidget(editor, 1);
-        QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {
-            devicesWindow->setFocus();
-        });
         auto *logToggle = new QPushButton(QStringLiteral("OSC Log"));
         logToggle->setCheckable(true);
         auto *footer = new QHBoxLayout;
@@ -589,15 +576,13 @@ int main(int argc, char **argv)
         root->addLayout(left, 1);
 
         // The file of the show: its name in the header and in the title, • while it is not saved
-        auto showPath = std::make_shared<QString>(cli.isSet(showOption) ? QFileInfo(cli.value(showOption)).absoluteFilePath()
-                                                                        : QSettings().value(QStringLiteral("showPath")).toString());
-        const auto title = [&window, showName, showPath, &device] {
+        auto showPath = std::make_shared<QString>(initialShowPath);
+        const auto title = [&window, showPath, &device] {
             const QString n = showPath->isEmpty() ? QStringLiteral("Untitled show") : QFileInfo(*showPath).completeBaseName();
             const QString mark = device.modified() ? QStringLiteral("  •") : QString();
-            showName->setText(n + mark);
             window.setWindowTitle(QStringLiteral("OSCQlock — %1%2").arg(n, mark));
         };
-        const auto saveTo = [&window, &device, &destinations, showPath, title](QString path) {
+        const auto saveTo = [&window, &device, &destinations, showPath, showPathKey, title](QString path) {
             if (path.isEmpty())
                 path = QFileDialog::getSaveFileName(&window, QStringLiteral("Save the show"), *showPath,
                                                     QStringLiteral("OSCQlock show (*.%1)").arg(show::kSuffix));
@@ -609,13 +594,13 @@ int main(int argc, char **argv)
                 return;
             }
             *showPath = path;
-            QSettings().setValue(QStringLiteral("showPath"), path);
+            QSettings().setValue(showPathKey, path);
             device.setSaved();
             title();
         };
         QObject::connect(saveAction, &QAction::triggered, &window, [saveTo, showPath] { saveTo(*showPath); });
         QObject::connect(saveAsAction, &QAction::triggered, &window, [saveTo] { saveTo(QString()); });
-        QObject::connect(openAction, &QAction::triggered, &window, [&window, &device, &destinations, showPath, title, saveTo, undo] {
+        QObject::connect(openAction, &QAction::triggered, &window, [&window, &device, &destinations, showPath, showPathKey, title, saveTo, undo] {
             // What would be replaced and is not in a file: saved first, or let go, or nothing opened
             if (device.modified()) {
                 const auto answer = QMessageBox::question(&window, QStringLiteral("Open a show"),
@@ -636,7 +621,7 @@ int main(int argc, char **argv)
                 return;
             }
             *showPath = path;
-            QSettings().setValue(QStringLiteral("showPath"), path);
+            QSettings().setValue(showPathKey, path);
             undo->clear(); // another show: what was done before is not undone in it
             title();
         });

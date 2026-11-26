@@ -141,7 +141,7 @@ private:
         for (const pxs::devices::Device *dest : all) {
             const QString kind = QString::fromLatin1(pxs::core::device::name(dest->kind));
             QMenu *sub = menu->addMenu(QStringLiteral("%1   (%2%3)").arg(QString::fromStdString(dest->name), kind, d->online(dest->id) ? QString() : QStringLiteral(", offline")));
-            const std::vector<ParamInfo> params = d->manager().params(dest->id, true);
+            const std::vector<ParamInfo> params = d->params(dest->id);
             if (params.empty()) {
                 sub->addAction(dest->kind == pxs::devices::Kind::Osc ? QStringLiteral("No address: declare them in Devices…")
                                                                     : QStringLiteral("Nothing to drive (its namespace is not read yet)"))

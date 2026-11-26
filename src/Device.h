@@ -47,7 +47,6 @@ public:
     struct Timeline {
         Animation anim;             // its id, name, transport and tracks
         std::string slug;           // its node: /generator/<slug>
-        std::vector<bool> legacyNormalized; // populated only while opening a show prior to explicit output filters
         std::vector<double> values; // each track's value now, after its filters
         int passesDone = 0;
         size_t builtTracks = 0;     // the track nodes made
@@ -177,9 +176,8 @@ private:
     void tick();
     void sequenceChanged(); // the nodes of /sequence told, the settings
     QJsonArray timelinesJson() const;
-    void readTimelines(const QJsonArray &list, bool legacyOutput);
-    void migrateTimelineOutputs(); // into m_timelines, with their nodes
-    void readSequence(const QJsonObject &o); // "sequences", or the "cues" of an OSCQlock before NyxMap's sequencer
+    void readTimelines(const QJsonArray &list);
+    void readSequence(const QJsonObject &o);
     void load();
     void save();          // soon (the settings are written a moment after the last edit)
     void writeSettings(); // now
@@ -207,7 +205,6 @@ private:
         for (const auto &l : std::vector(m_timelinesListeners)) l.second();
     }
     void rebuildPresetTargets();
-    void migratePresetAddresses();
     void readPresets(const QJsonArray &presets);
     pxs::core::tree::PresetPlayback m_presetPlayback;
     std::function<void(const QString &)> m_presetRejected;

@@ -1,4 +1,5 @@
 #include "Destinations.h"
+#include "Show.h"
 
 #include <QJsonDocument>
 #include <QHostInfo>
@@ -14,24 +15,12 @@ Destinations::Destinations(const QString &name, quint16 port, bool persistent, Q
 {
     if (persistent) {
         QSettings settings;
-        auto stored = QJsonDocument::fromJson(settings.value(QStringLiteral("devicePatch")).toByteArray()).array();
-        if (stored.isEmpty()) {
-            const auto legacy = QJsonDocument::fromJson(settings.value(QStringLiteral("destinations")).toByteArray()).object();
-            const auto keys = legacy.value("ids").toObject();
-            QJsonArray patched;
-            for (const auto &value : legacy.value("devices").toArray()) {
-                auto item = value.toObject();
-                const QString key = item.value("kind").toString() == QStringLiteral("osc")
-                    ? QStringLiteral("osc:") + item.value("name").toString()
-                    : QStringLiteral("oscquery:%1:%2").arg(item.value("host").toString()).arg(item.value("port").toInt());
-                item["id"] = keys.value(key);
-                patched.append(item);
-            }
-            stored = {QJsonObject{{"registry", QJsonObject{{"ids", keys}, {"devices", patched}}}}};
-        }
-        readShow(stored);
+        settings.beginGroup(show::settingsGroup());
+        readShow(QJsonDocument::fromJson(settings.value(QStringLiteral("devicePatch")).toByteArray()).array());
         connect(this, &Destinations::changed, this, [this] {
-            QSettings().setValue(QStringLiteral("devicePatch"), QJsonDocument(showJson()).toJson(QJsonDocument::Compact));
+            QSettings settings;
+            settings.beginGroup(show::settingsGroup());
+            settings.setValue(QStringLiteral("devicePatch"), QJsonDocument(showJson()).toJson(QJsonDocument::Compact));
         });
     }
     connect(&m_devices, &pxs::devices::Devices::changed, this, [this] {
@@ -133,27 +122,11 @@ std::map<quint64, quint64> Destinations::readShow(const QJsonArray &devices)
 {
     QScopedValueRollback loading(m_loading, true);
     std::map<quint64, quint64> ids;
-    QJsonObject registry, keys;
-    QJsonArray manual, outputs;
     const auto first = devices.isEmpty() ? QJsonObject{} : devices.first().toObject();
-    if (first.contains("registry")) {
-        registry = first.value("registry").toObject();
-        keys = registry.value("ids").toObject();
-        manual = registry.value("devices").toArray();
-        outputs = first.value("dmx_outputs").toArray();
-    } else {
-        for (const auto &value : devices) {
-            auto object = value.toObject();
-            const bool discovered = object.value("kind").toString() == QStringLiteral("found");
-            if (discovered) object["kind"] = QStringLiteral("oscquery");
-            auto device = pxs::core::device::fromJson(QJsonDocument(object).toJson(QJsonDocument::Compact).toStdString());
-            if (!device) continue;
-            device->manual = !discovered;
-            if (device->id) keys[QString::fromStdString(device->key())] = double(device->id);
-            if (!discovered) manual.append(object);
-        }
-        registry = QJsonObject{{"ids", keys}, {"devices", manual}};
-    }
+    const auto registry = first.value("registry").toObject();
+    const auto keys = registry.value("ids").toObject();
+    const auto manual = registry.value("devices").toArray();
+    const auto outputs = first.value("dmx_outputs").toArray();
     for (const auto &id : keys) if (id.toDouble() > 0) ids.emplace(quint64(id.toDouble()), quint64(id.toDouble()));
     for (const auto &value : manual) {
         const auto id = quint64(value.toObject().value("id").toDouble());

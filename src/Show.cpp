@@ -13,10 +13,6 @@
 
 namespace show {
 
-namespace {
-constexpr int kVersion = 3;
-}
-
 bool save(const QString &path, const Device &device, const Destinations &destinations, QString *error)
 {
     QJsonObject o = device.show();
@@ -50,8 +46,8 @@ bool open(const QString &path, Device &device, Destinations &destinations, QStri
         if (error) *error = QStringLiteral("not an OSCQlock show");
         return false;
     }
-    if (o.value("version").toInt() > kVersion) {
-        if (error) *error = QStringLiteral("made by a newer OSCQlock");
+    if (o.value("version").toInt() != kVersion) {
+        if (error) *error = QStringLiteral("Unsupported show version. Expected version %1.").arg(kVersion);
         return false;
     }
     // The devices first: what each id of the file is here, and the tracks made to drive those
