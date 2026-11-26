@@ -13,6 +13,7 @@
 #include <pxs/TimelineHost.h>
 #include <Interactions.h>
 #include <pxs/Sequencer.h>
+#include <pxs/core/tree/preset.h>
 #include <pxs/core/tree/tree.h>
 
 #include <QElapsedTimer>
@@ -88,6 +89,20 @@ public:
     // ---- the cue list: NyxMap's sequencer (pxs-qt), its steps driving the timelines. The Device is its host, and moves its waits
     // with its own clock (on this thread: fadesManual)
 
+    // The presets of the show: captures of the tree state
+    const std::vector<pxs::core::tree::Preset> &presets() const { return m_presets; }
+    void setPresets(const std::vector<pxs::core::tree::Preset> &presets);
+    int addPresetsListener(std::function<void()> callback)
+    {
+        m_presetsListeners.emplace_back(++m_lastPresetsListener, std::move(callback));
+        return m_lastPresetsListener;
+    }
+    void forgetPresetsListener(int id)
+    {
+        m_presetsListeners.erase(std::remove_if(m_presetsListeners.begin(), m_presetsListeners.end(), [id](const auto &l) { return l.first == id; }),
+                                 m_presetsListeners.end());
+    }
+
     Sequencer &sequencer() { return m_sequencer; }
     const Sequencer &sequencer() const { return m_sequencer; }
 
@@ -95,6 +110,12 @@ public:
     void controlAnimation(quint64 id, AnimAction action, double value, AnimLoop loop, int repeat) override;
     double animationPlayTime(quint64 id) const override;
     double animationRemaining(quint64 id) const override;
+    int indexOfPreset(quint64 id) const override;
+    void onPresetRejected(std::function<void(const QString &)> fn) { m_presetRejected = std::move(fn); }
+    void recallPreset(int index, double fade) override;
+    void recallPreset(int index, double fade, const pxs::core::tree::Preset &overrides) override;
+    double presetDuration(quint64 id, double fade, const pxs::core::tree::Preset &overrides) const override;
+    void finishRecalls() override { m_presetPlayback.finish(m_tree); }
     const BeatClock &beatClock() const override { return m_beat; }
     bool fadesManual() const override { return true; }
     void stopAll(); // every wait and follow of the sequences stopped, and every timeline
@@ -102,6 +123,7 @@ public:
     // ---- a show: the timelines, the sequence, and (with Destinations) the devices made by hand
 
     QJsonObject show() const;
+    QJsonArray presetsJson() const;
     bool loadShow(const QJsonObject &show, QString *error = nullptr); // replaces the timelines and the sequence
     // What a show file holds (the timelines, the sequence, the devices) differs from when it was last saved or opened: a play or a seek does
     // not count
@@ -181,6 +203,18 @@ private:
     void tellTimelines() const
     {
         for (const auto &l : std::vector(m_timelinesListeners)) l.second();
+    }
+    void rebuildPresetTargets();
+    void migratePresetAddresses();
+    void readPresets(const QJsonArray &presets);
+    pxs::core::tree::PresetPlayback m_presetPlayback;
+    std::function<void(const QString &)> m_presetRejected;
+    std::vector<pxs::core::tree::Preset> m_presets;
+    std::vector<std::pair<int, std::function<void()>>> m_presetsListeners;
+    int m_lastPresetsListener = 0;
+    void tellPresets() const
+    {
+        for (const auto &l : std::vector(m_presetsListeners)) l.second();
     }
     pxs::Annotated<QRecursiveMutex> m_lock; // the sequencer's (everything here is on one thread: fadesManual)
     BeatClock m_beat;

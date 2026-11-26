@@ -1,17 +1,26 @@
 // OSCQlock: a device that exists to be tested against. It generates a signal (a sine, a saw, a triangle, a square or noise), and says
 // everything about it in every kind of node the pxs-core tree has (see Device.h for the namespace), so that a controller, an explorer or a
-// mapper can be tried on all of them. The window shows the same tree, a tab for each top-level node (Panel.h).
+// mapper can be tried on all of them. The window brings together the device patch and show editors.
 //
 // Run it, then explore it:  curl http://127.0.0.1:5678/   (or find "OSCQlock" on the network from any OSCQuery client).
 #include "Destinations.h"
 #include "Device.h"
-#include "DevicesWindow.h"
+#include <pxs/DevicesPanel.h>
+#include <pxs/OutputsPanel.h>
+#include <QTabWidget>
 #include "Commands.h"
 #include "GeneratorEditor.h"
-#include "Panel.h"
 #include "Show.h"
 
 #include <pxs/OscService.h>
+#include <pxs/PresetView.h>
+#include <QSplitter>
+#include <QTcpServer>
+#include <QStackedWidget>
+#include <QPointer>
+#include <QFormLayout>
+#include <QScrollArea>
+#include <QScopedValueRollback>
 #include <pxs/SequenceView.h>
 #include <pxs/Theme.h>
 #include <Fields.h>
@@ -57,7 +66,12 @@ int selfTest()
     for (const std::string &problem : problems) std::fprintf(stderr, "OSCQlock: the tree lacks something: %s\n", problem.c_str());
     pxs::OscService service(&device.tree(), QStringLiteral("OSCQlock"));
     service.setLocalOnly(true);
-    if (!service.start(0, 0, false)) return 2;
+    QUdpSocket occupiedUdp;
+    QTcpServer occupiedTcp;
+    if (!occupiedUdp.bind(QHostAddress::LocalHost, 0, QUdpSocket::DontShareAddress) ||
+        !occupiedTcp.listen(QHostAddress::LocalHost, 0) ||
+        !service.start(occupiedUdp.localPort(), occupiedTcp.serverPort(), false) ||
+        service.oscPort() == occupiedUdp.localPort() || service.httpPort() == occupiedTcp.serverPort()) return 2;
     QNetworkAccessManager net;
     QEventLoop loop;
     QByteArray body;
@@ -131,10 +145,10 @@ int selfTest()
     {
         QEventLoop wait;
         QObject::connect(&destinations, &Destinations::changed, &wait, [&] {
-            if (const Destination *d = destinations.find(query); d && d->online) wait.quit();
+            if (destinations.online(query)) wait.quit();
         });
         QTimer::singleShot(5000, &wait, &QEventLoop::quit);
-        if (!destinations.find(query)->online) wait.exec();
+        if (!destinations.online(query)) wait.exec();
     }
     Animation driving = device.timelines().front().anim;
     AnimTrack number, onOff;
@@ -160,7 +174,7 @@ int selfTest()
         QTimer::singleShot(5000, &wait, &QEventLoop::quit);
         wait.exec();
     }
-    const bool queried = destinations.find(query)->online && !destinations.params(query).empty() &&
+    const bool queried = destinations.online(query) && !destinations.params(query).empty() &&
                          std::abs(value("/generator/timeline2/timeline/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/generator/timeline2/transport/play").truthy();
     if (!queried) std::fprintf(stderr, "OSCQlock: a track did not reach its OSCQuery device (float %g, switch %d)\n",
                                value("/generator/timeline2/timeline/speed").number().value_or(-1), int(value("/generator/timeline2/transport/play").truthy()));
@@ -233,8 +247,28 @@ int selfTest()
     undone = undone && device.sequencer().sequence(0).steps.back().description == QLatin1String("One");
     if (!undone) std::fprintf(stderr, "OSCQlock: an undo did not put things back\n");
 
+    device.stopAll();
+    const auto address = destinations.presetPath(osc) + "/level";
+    const bool writable = device.tree().apply(address, {Value(0.2)}) == 1;
+    auto preset = pxs::core::tree::capture(device.tree(), {address});
+    preset.id = "12345";
+    preset.fade = 1;
+    device.setPresets({preset});
+    Sequencer::Step recall;
+    recall.preset = 12345;
+    recall.presetOverrides.values[address] = "[0.75]";
+    recall.presetOverrides.times[address] = 0;
+    auto presetSequence = device.sequencer().sequence(0);
+    presetSequence.steps = {recall};
+    device.sequencer().setSequence(0, presetSequence);
+    const auto encoded = Sequencer::stepToJson(recall);
+    const bool timed = address == "/devices/receiver/level" && writable && preset.values.count(address) && encoded.contains("preset_overrides")
+        && device.sequencer().goTo(0)
+        && device.tree().find(address)->get().front().number() == 0.75;
+    if (!timed) std::fprintf(stderr, "OSCQlock: preset capture or step override failed\n");
+
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried && cued && shown && undone;
+    feedback = feedback && made && sent && queried && cued && shown && undone && timed;
 
     bool served = !body.isEmpty() && feedback;
     for (const std::string &tab : device.tabs()) served = served && body.contains(QByteArray("\"") + tab.c_str() + "\"");
@@ -279,6 +313,8 @@ int main(int argc, char **argv)
     Device device(nullptr, keep);
     for (const std::string &problem : device.tree().check()) qWarning("OSCQlock: the tree lacks something: %s", problem.c_str()); // what every pxs tree must have
     pxs::OscService service(&device.tree(), cli.value(name));
+    QObject::connect(&service, &pxs::OscService::logMessage, &service,
+                     [](const QString &message) { qInfo().noquote() << message; });
     service.setLocalOnly(cli.isSet(local));
     if (!service.start(cli.value(oscPort).toUShort(), cli.value(httpPort).toUShort(), !cli.isSet(local))) {
         qCritical("OSCQlock: could not open its ports");
@@ -300,7 +336,7 @@ int main(int argc, char **argv)
 
     QWidget window;
     QPlainTextEdit *log = new QPlainTextEdit;
-    DevicesWindow *devicesWindow = nullptr;
+    QWidget *devicesWindow = nullptr;
     if (!cli.isSet(headless)) {
         window.setWindowTitle("OSCQlock");
         window.setMinimumSize(760, 520);
@@ -314,13 +350,13 @@ int main(int argc, char **argv)
         auto *header = new QHBoxLayout;
         auto *brand = new QLabel(QStringLiteral("OSC<span style='color:#ff8a3d'>Q</span>lock"));
         brand->setObjectName(QStringLiteral("brand"));
-        brand->setStyleSheet(QStringLiteral("#brand { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }"));
+        brand->setStyleSheet(QStringLiteral("#brand { font-weight: 600; }"));
         header->addWidget(brand);
         const auto pill = [](const QString &text, const QString &tip) {
             auto *l = new QLabel(text);
             l->setToolTip(tip);
             l->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            l->setStyleSheet(QStringLiteral("QLabel { border: 1px solid #3a3d44; border-radius: 10px; padding: 2px 10px; color: #c8ccd4; font-size: 11px; }"));
+            l->setStyleSheet(QStringLiteral("QLabel { border: 1px solid #3a3d44; border-radius: 10px; padding: 2px 10px; color: #c8ccd4; }"));
             return l;
         };
         header->addSpacing(12);
@@ -330,7 +366,7 @@ int main(int argc, char **argv)
         header->addStretch(1);
         // The show: its file, opened and saved (what is done is kept between launches anyway)
         auto *showName = new QLabel;
-        showName->setStyleSheet(QStringLiteral("color: #c8ccd4; font-size: 12px;"));
+        showName->setStyleSheet(QStringLiteral("color: #c8ccd4;"));
         auto *openButton = new QPushButton(QStringLiteral("Open…"));
         auto *saveButton = new QPushButton(QStringLiteral("Save"));
         auto *saveAsButton = new QPushButton(QStringLiteral("Save as…"));
@@ -374,6 +410,11 @@ int main(int argc, char **argv)
                 return out;
             }
             quint64 currentTimeline() const override { return device->shown(); }
+            const pxs::core::tree::Preset *preset(quint64 id) const override
+            {
+                const int index = device->indexOfPreset(id);
+                return index < 0 ? nullptr : &device->presets()[index];
+            }
             void stopAll(Sequencer &) override { device->stopAll(); }
         };
         auto *targets = new SequenceTargets;
@@ -382,17 +423,134 @@ int main(int argc, char **argv)
         QObject::connect(sequence, &QObject::destroyed, [targets] { delete targets; });
         const int sequenceListener = device.addTimelinesListener([sequence] { sequence->rebuild(); }); // the timelines a step can drive
         QObject::connect(sequence, &QObject::destroyed, [&device, sequenceListener] { device.forgetTimelinesListener(sequenceListener); });
-        auto *controls = new Panel(device.tree(), device.tabs(), device.declared(), Panel::Mode::Controls, {{"generator", generator}, {"sequence", sequence}});
-        controls->setMinimumSize(640, 380);
-        controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        left->addWidget(controls, 1);
-        auto *received = new QLabel("OSC received");
-        received->setObjectName("caption");
-        left->addWidget(received);
+
+        struct PresetScopes : pxs::presetview::PresetHost {
+            const Destinations &destinations;
+            explicit PresetScopes(const Destinations &d) : destinations(d) {}
+            std::vector<std::pair<QString, QString>> scopes() const override
+            {
+                std::vector<std::pair<QString, QString>> out{{{}, QStringLiteral("All known parameters")},
+                                                            {QStringLiteral("/devices"), QStringLiteral("All devices")}};
+                for (const auto *device : destinations.all())
+                    if (const auto path = destinations.presetPath(device->id); !path.empty() && !destinations.isLocalService(*device))
+                        out.emplace_back(QString::fromStdString(path), QString::fromStdString(device->name));
+                return out;
+            }
+        };
+        auto *scopes = new PresetScopes(destinations);
+        auto *presetView = new pxs::presetview::PresetView(device.tree(), undo, scopes);
+        QObject::connect(presetView, &QObject::destroyed, [scopes] { delete scopes; });
+        QObject::connect(&destinations, &Destinations::changed, presetView, &pxs::presetview::PresetView::rebuildScopes);
+        presetView->setPresets(device.presets());
+        presetView->setRecaller([&device](int index) { device.recallPreset(index, -1); });
+        auto editingPreset = std::make_shared<bool>(false);
+        QObject::connect(presetView, &pxs::presetview::PresetView::presetsChanged, [&device, presetView, editingPreset] {
+            QScopedValueRollback guard(*editingPreset, true);
+            device.setPresets(presetView->presets());
+        });
+        const int presetListener = device.addPresetsListener([presetView, sequence, &device, editingPreset] {
+            if (!*editingPreset) presetView->setPresets(device.presets());
+            sequence->rebuild();
+        });
+        QObject::connect(presetView, &QObject::destroyed, [&device, presetListener] {
+            device.forgetPresetsListener(presetListener);
+        });
+
+        auto *patch = new QTabWidget;
+        devicesWindow = patch;
+        auto *patchPanel = new pxs::devices::DevicesPanel(&destinations.manager());
+        patchPanel->setCompactList();
+        patch->addTab(patchPanel, QStringLiteral("Device Manager"));
+        auto *outputs = new pxs::dmx::OutputsPanel;
+        outputs->setDefaultSourceName(QStringLiteral("OSCQlock"));
+        outputs->setMappingShown(true);
+        outputs->setOutputs(destinations.outputs());
+        outputs->setStateSource([&destinations](quint64 id) { return destinations.outputState(id); });
+        QObject::connect(outputs, &pxs::dmx::OutputsPanel::outputsChanged, &destinations,
+                         [&destinations](const auto &list, const auto &, const auto &) { destinations.setOutputs(list); });
+        QObject::connect(&destinations, &Destinations::changed, outputs, [outputs, &destinations] {
+            if (outputs->outputs() != destinations.outputs()) outputs->setOutputs(destinations.outputs());
+        });
+        auto *outputScroll = new QScrollArea;
+        outputScroll->setWidgetResizable(true);
+        outputScroll->setWidget(outputs);
+        patch->addTab(outputScroll, QStringLiteral("DMX Outputs"));
+        auto *upper = new QSplitter(Qt::Horizontal);
+        upper->addWidget(devicesWindow);
+        const auto titled = [](const QString &name, QWidget *content) {
+            auto *pane = new QWidget;
+            auto *layout = new QVBoxLayout(pane);
+            layout->setContentsMargins(4, 0, 4, 0);
+            layout->addWidget(new QLabel(name));
+            layout->addWidget(content, 1);
+            return pane;
+        };
+        upper->addWidget(titled(QStringLiteral("Sequence"), sequence));
+        upper->addWidget(titled(QStringLiteral("Presets"), presetView));
+        upper->setSizes({260, 550, 215});
+        auto *workspace = new QSplitter(Qt::Vertical);
+        workspace->addWidget(upper);
+        workspace->addWidget(titled(QStringLiteral("Timelines"), generator));
+        workspace->setSizes({440, 340});
+        auto *inspector = new QStackedWidget;
+        inspector->addWidget(presetView->inspector());
+        inspector->addWidget(patchPanel->inspector());
+        auto stepDetails = std::make_shared<QPointer<QWidget>>();
+        const auto showDetails = [inspector, stepDetails](QWidget *details) {
+            if (*stepDetails) {
+                inspector->removeWidget(*stepDetails);
+                (*stepDetails)->deleteLater();
+            }
+            *stepDetails = details;
+            inspector->addWidget(details);
+            inspector->setCurrentWidget(details);
+        };
+        sequence->setInspectorSink(showDetails);
+        QObject::connect(patchPanel, &pxs::devices::DevicesPanel::deviceSelected, inspector,
+                         [inspector, patchPanel](quint64) { inspector->setCurrentWidget(patchPanel->inspector()); });
+        generator->setInspectorSink([&device, showDetails](quint64 id) {
+            const auto *timeline = device.timeline(id);
+            if (!timeline) return;
+            auto *details = new QWidget;
+            auto *form = new QFormLayout(details);
+            form->addRow(QStringLiteral("Timeline"), new QLabel(timeline->anim.name));
+            form->addRow(QStringLiteral("Duration"), new QLabel(QStringLiteral("%1 s").arg(timeline->anim.duration)));
+            form->addRow(QStringLiteral("Tracks"), new QLabel(QString::number(timeline->anim.tracks.size())));
+            showDetails(details);
+        });
+        QObject::connect(presetView, &pxs::presetview::PresetView::presetSelected, inspector,
+                         [inspector, presetView] { inspector->setCurrentWidget(presetView->inspector()); });
+        auto *editor = new QSplitter(Qt::Horizontal);
+        editor->addWidget(workspace);
+        auto *inspection = new QWidget;
+        auto *inspectionLayout = new QVBoxLayout(inspection);
+        inspectionLayout->addWidget(new QLabel(QStringLiteral("Inspector")));
+        inspectionLayout->addWidget(inspector, 1);
+        editor->addWidget(inspection);
+        inspection->setMinimumWidth(365);
+        editor->setSizes({1050, 400});
+        left->addWidget(editor, 1);
+        QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {
+            devicesWindow->setFocus();
+        });
+        auto *logToggle = new QPushButton(QStringLiteral("OSC Log"));
+        logToggle->setCheckable(true);
+        auto *footer = new QHBoxLayout;
+        footer->addWidget(logToggle);
+        auto *recallStatus = new QLabel;
+        recallStatus->setWordWrap(true);
+        footer->addWidget(recallStatus, 1);
+        left->addLayout(footer);
+        const QPointer<QLabel> status(recallStatus);
+        device.onPresetRejected([status](const QString &message) {
+            if (status) status->setText(message);
+        });
         log->setReadOnly(true);
         log->setMaximumBlockCount(400);
         log->setFixedHeight(84);
         left->addWidget(log);
+        log->hide();
+        QObject::connect(logToggle, &QPushButton::toggled, log, &QWidget::setVisible);
         root->addLayout(left, 1);
 
         // The file of the show: its name in the header and in the title, • while it is not saved
@@ -470,17 +628,11 @@ int main(int argc, char **argv)
             redoButton->setToolTip(redoAction->text() + QStringLiteral("  (") + QKeySequence(QKeySequence::Redo).toString(QKeySequence::NativeText) + ')');
         });
 
-        devicesWindow = new DevicesWindow(&destinations, &window);
-        QObject::connect(devicesButton, &QPushButton::clicked, devicesWindow, [devicesWindow] {
-            devicesWindow->show();
-            devicesWindow->raise();
-            devicesWindow->activateWindow();
-        });
-        window.resize(1180, 780);
+        window.resize(1480, 860);
         if (cli.isSet(tabOption)) device.tree().apply("/ui/tab", {Value(cli.value(tabOption).toStdString())});
         window.show();
         const bool devicesShot = cli.value(tabOption) == QLatin1String("devices"); // --tab devices: the Devices window
-        if (devicesShot) devicesWindow->show();
+
         if (cli.isSet(screenshot))
             QTimer::singleShot(1500, &window, [&window, devicesWindow, devicesShot, file = cli.value(screenshot)] {
                 (devicesShot ? static_cast<QWidget *>(devicesWindow) : &window)->grab().save(file);

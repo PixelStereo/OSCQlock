@@ -14,17 +14,13 @@
 namespace show {
 
 namespace {
-constexpr int kVersion = 1;
+constexpr int kVersion = 2;
 }
 
 bool save(const QString &path, const Device &device, const Destinations &destinations, QString *error)
 {
     QJsonObject o = device.show();
-    std::vector<quint64> used;
-    for (const Device::Timeline &t : device.timelines())
-        for (const AnimTrack &track : t.anim.tracks)
-            if (track.layer && std::find(used.begin(), used.end(), track.layer) == used.end()) used.push_back(track.layer);
-    o["devices"] = destinations.showJson(used);
+    o["devices"] = destinations.showJson();
     o["format"] = QStringLiteral("oscqlock-show");
     o["version"] = kVersion;
     QSaveFile file(path);

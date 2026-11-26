@@ -39,6 +39,7 @@ class GeneratorPage : public QWidget
 public:
     GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
     ~GeneratorPage() override;
+    void setInspectorSink(std::function<void(quint64)> sink) { m_inspectorSink = std::move(sink); }
     void tick(); // a step of the device (the window calls it)
 
 private:
@@ -51,4 +52,5 @@ private:
     TimelineEditor *m_editor;
     bool m_syncing = false;
     int m_listener = 0;
+    std::function<void(quint64)> m_inspectorSink;
 };

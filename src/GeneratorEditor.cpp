@@ -11,6 +11,10 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QTabBar>
+#include <QApplication>
+#include <QDrag>
+#include <QMimeData>
+#include <QMouseEvent>
 #include <QTimer>
 #include <QToolButton>
 #include <QUndoStack>
@@ -33,9 +37,9 @@ public:
         const AnimTrack &t = track();
         m_on->setChecked(t.enabled);
         Destinations *d = m_tl->device()->destinations();
-        const Destination *dest = d && t.layer ? d->find(t.layer) : nullptr;
-        QString where = t.layer == 0 ? QStringLiteral("OSCQlock") : dest ? dest->name : QStringLiteral("(a device not here)");
-        if (dest && !dest->online) where += QStringLiteral(" (offline)");
+        const pxs::devices::Device *dest = d && t.layer ? d->find(t.layer) : nullptr;
+        QString where = t.layer == 0 ? QStringLiteral("OSCQlock") : dest ? QString::fromStdString(dest->name) : QStringLiteral("(a device not here)");
+        if (dest && !d->online(dest->id)) where += QStringLiteral(" (offline)");
         m_target->setText(t.param.isEmpty() ? QStringLiteral("(choose what it drives)")
                                             : QStringLiteral("%1  ›  %2").arg(where, t.layer == 0 ? QStringLiteral("Output") : t.param));
         m_filling = false;
@@ -79,14 +83,14 @@ private:
         own->setChecked(t.layer == 0 && t.param == QLatin1String("output"));
         menu->addSeparator();
         Destinations *d = m_tl->device()->destinations();
-        const auto all = d ? d->all() : std::vector<const Destination *>{};
+        const auto all = d ? d->all() : std::vector<const pxs::devices::Device *>{};
         if (all.empty()) menu->addAction(QStringLiteral("No device yet: open Devices… to find or make one"))->setEnabled(false);
-        for (const Destination *dest : all) {
-            const QString kind = dest->kind == Destination::Kind::Osc ? QStringLiteral("OSC") : QStringLiteral("OSCQuery");
-            QMenu *sub = menu->addMenu(QStringLiteral("%1   (%2%3)").arg(dest->name, kind, dest->online ? QString() : QStringLiteral(", offline")));
+        for (const pxs::devices::Device *dest : all) {
+            const QString kind = QString::fromLatin1(pxs::core::device::name(dest->kind));
+            QMenu *sub = menu->addMenu(QStringLiteral("%1   (%2%3)").arg(QString::fromStdString(dest->name), kind, d->online(dest->id) ? QString() : QStringLiteral(", offline")));
             const std::vector<ParamInfo> params = d->params(dest->id);
             if (params.empty()) {
-                sub->addAction(dest->kind == Destination::Kind::Osc ? QStringLiteral("No address: declare them in Devices…")
+                sub->addAction(dest->kind == pxs::devices::Kind::Osc ? QStringLiteral("No address: declare them in Devices…")
                                                                     : QStringLiteral("Nothing to drive (its namespace is not read yet)"))
                     ->setEnabled(false);
                 continue;
@@ -215,6 +219,36 @@ TrackRow *TimelineEditor::makeRow(int index) { return new TargetRow(this, index)
 
 // ---- the page: the sub-tabs and the editor
 
+namespace {
+class TimelineTabs : public QTabBar {
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        m_start = event->position().toPoint();
+        QTabBar::mousePressEvent(event);
+    }
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        const int tab = tabAt(m_start);
+        if (tab >= 0 && (event->buttons() & Qt::LeftButton) &&
+            (m_start - event->position().toPoint()).manhattanLength() >= QApplication::startDragDistance()) {
+            const quint64 id = tabData(tab).toULongLong();
+            if (id) {
+                auto *mime = new QMimeData;
+                mime->setData("application/x-pxs-timeline", QByteArray::number(id));
+                QDrag drag(this);
+                drag.setMimeData(mime);
+                drag.exec(Qt::CopyAction);
+                return;
+            }
+        }
+        QTabBar::mouseMoveEvent(event);
+    }
+private:
+    QPoint m_start;
+};
+}
+
 GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) : QWidget(parent), m_device(device), m_undo(undo)
 {
     auto *outer = new QVBoxLayout(this);
@@ -223,7 +257,7 @@ GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) 
 
     auto *bar = new QHBoxLayout;
     bar->setSpacing(4);
-    m_tabs = new QTabBar;
+    m_tabs = new TimelineTabs;
     m_tabs->setObjectName(QStringLiteral("timelines"));
     m_tabs->setDocumentMode(true);
     m_tabs->setExpanding(false);
@@ -260,6 +294,10 @@ GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) 
         const auto at = std::find_if(all.begin(), all.end(), [id](const Device::Timeline &t) { return t.anim.id == id; });
         if (at != all.end()) m_undo->push(new cmd::TimelineThere(m_device, at->anim, int(at - all.begin()), true));
         m_device->show(id);
+    });
+    connect(m_tabs, &QTabBar::tabBarClicked, this, [this](int index) {
+        const auto id = m_tabs->tabData(index).toULongLong();
+        if (id && m_inspectorSink) m_inspectorSink(id);
     });
     connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
         if (m_syncing || index < 0) return;
