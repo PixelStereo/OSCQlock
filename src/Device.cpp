@@ -1,5 +1,6 @@
 #include "Device.h"
 #include <pxs/PresetView.h>
+#include <TimelineTree.h>
 #include "Show.h"
 
 #include <pxs/core/tree/parameter.h>
@@ -9,6 +10,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QCoreApplication>
 #include <QSettings>
 
 #include <algorithm>
@@ -93,7 +95,7 @@ void Device::said(const std::string &path, const ValueList &args)
 {
     std::string text = path;
     for (const Value &v : args) text += ' ' + (v.is<Blob>() ? std::string("<blob>") : v.text());
-    m_tree.fire("/generator/last_action", {Value(text)});
+    m_tree.fire("/timelines/last-action", {Value(text)});
 }
 
 Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent(persistent), m_sequencer(*this, m_lock, this)
@@ -104,8 +106,9 @@ Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent
         m_saveTimer.setInterval(400);
         connect(&m_saveTimer, &QTimer::timeout, this, [this] { writeSettings(); });
         load();
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &Device::writeSettings);
     }
-    buildGenerator();
+    buildTimelines();
     buildSequence();
     buildUi();
     m_clock.start();
@@ -113,11 +116,9 @@ Device::Device(QObject *parent, bool persistent) : QObject(parent), m_persistent
     m_timer.start(20); // 50 Hz
 }
 
-// ---- /generator: the timelines
+// ---- /timelines: the timelines
 
 namespace {
-
-std::string slugOf(quint64 id) { return "timeline" + std::to_string(id); }
 
 // A track of a sine of a second between 0 and 1 on OSCQlock's own output, as a new timeline starts with
 AnimTrack firstTrack()
@@ -136,25 +137,25 @@ AnimTrack firstTrack()
 
 } // namespace
 
-void Device::buildGenerator()
+void Device::buildTimelines()
 {
-    group("/generator", "Timelines",
+    group("/timelines", "Timelines",
           "The timelines, as NyxMap's: each a sub-tab, its tracks driving OSCQlock's own outputs or the devices of the network, through filters. "
           "A node that holds nodes that hold parameters, actions, signals, or a mix");
-    action("/generator/new", "N", "New timeline", "A timeline more, shown", [this](const ValueList &) {
+    action("/timelines/new", "N", "New timeline", "A timeline more, shown", [this](const ValueList &) {
         show(addTimeline());
         return true;
     });
-    action("/generator/new_named", "s", "New timeline, named", "A timeline more, of that name, shown", [this](const ValueList &v) {
+    action("/timelines/new-named", "s", "New timeline, named", "A timeline more, of that name, shown", [this](const ValueList &v) {
         show(addTimeline(QString::fromStdString(v.at(0).text())));
         return true;
     });
-    action("/generator/remove", "s", "Remove a timeline", "The timeline of that slug (timeline2…) goes (the last one stays)", [this](const ValueList &v) {
+    action("/timelines/remove", "s", "Remove a timeline", "Remove the named timeline (the last one stays)", [this](const ValueList &v) {
         for (const Timeline &t : m_timelines)
             if (t.slug == v.at(0).text()) return removeTimeline(t.anim.id);
         return false;
     });
-    signal("/generator/last_action", "s", "Last action", "The last action received, with its address and arguments");
+    signal("/timelines/last-action", "s", "Last action", "The last action received, with its address and arguments");
     if (m_timelines.empty()) addTimeline();
     buildShown();
 }
@@ -165,12 +166,12 @@ void Device::buildShown()
     for (const Timeline &t : m_timelines) slugs.push_back(t.slug);
     if (std::find(slugs.begin(), slugs.end(), s.shown) == slugs.end()) s.shown = slugs.empty() ? std::string() : slugs.front();
     // Already there: its choices are changed where it is (a client that listens to it keeps listening)
-    if (Node *shown = m_tree.find("/generator/shown"); shown && shown->parameter()) {
+    if (Node *shown = m_tree.find("/timelines/shown"); shown && shown->parameter()) {
         shown->parameter()->choices(slugs);
         ArgRange keys;
         for (const std::string &slug : slugs) keys.vals.emplace_back(slug);
         shown->range = {keys};
-        m_tree.changed("/generator/shown");
+        m_tree.changed("/timelines/shown");
         return;
     }
     auto p = std::make_unique<CoreParameter>("shown", "Shown", CoreParameter::Type::Choice);
@@ -183,7 +184,7 @@ void Device::buildShown()
                         tellTimelines();
                     }
             });
-    Node &n = m_tree.add("/generator/shown", std::move(p));
+    Node &n = m_tree.add("/timelines/shown", std::move(p));
     n.description = "The timeline the window shows (its sub-tab), by its slug. A parameter that holds actions";
     auto move = [this](int by) {
         if (m_timelines.empty()) return false;
@@ -192,14 +193,14 @@ void Device::buildShown()
             if (m_timelines[i].slug == s.shown) at = int(i);
         const int n = int(m_timelines.size());
         s.shown = m_timelines[size_t((at + by + n) % n)].slug;
-        m_tree.changed("/generator/shown");
+        m_tree.changed("/timelines/shown");
         tellTimelines();
         return true;
     };
-    m_tree.addAction("/generator/shown/next", "N", [move](const ValueList &) { return move(1); }, "The timeline after, round").label = "Next timeline";
-    m_tree.addAction("/generator/shown/previous", "N", [move](const ValueList &) { return move(-1); }, "The timeline before, round").label =
+    m_tree.addAction("/timelines/shown/next", "N", [move](const ValueList &) { return move(1); }, "The timeline after, round").label = "Next timeline";
+    m_tree.addAction("/timelines/shown/previous", "N", [move](const ValueList &) { return move(-1); }, "The timeline before, round").label =
         "Previous timeline";
-    m_tree.changed("/generator/shown");
+    m_tree.changed("/timelines/shown");
 }
 
 void Device::timelinesChanged()
@@ -223,18 +224,27 @@ const Device::Timeline *Device::timeline(quint64 id) const
     return nullptr;
 }
 
+std::string Device::claimTimelineName(const QString &name) const
+{
+    std::set<std::string> used{"new", "new-named", "remove", "shown", "last-action"};
+    for (const auto &timeline : m_timelines) used.insert(timeline.slug);
+    return pxs::timeline::claimSegment(name.toStdString(), used);
+}
+
 quint64 Device::addTimeline(const QString &name)
 {
     Timeline t;
     t.anim.id = m_nextTimeline++;
-    t.anim.name = name.trimmed().isEmpty() ? QStringLiteral("Timeline %1").arg(t.anim.id) : name.trimmed();
+    t.anim.name = name.trimmed().isEmpty() ? QStringLiteral("Timeline") : name.trimmed();
+    t.slug = claimTimelineName(t.anim.name);
+    if (name.trimmed().isEmpty() && t.slug != "timeline")
+        t.anim.name += QStringLiteral(" ") + QString::fromStdString(t.slug.substr(t.slug.rfind('-') + 1)).toUpper();
     t.anim.duration = 4;
     t.anim.setLoop(AnimLoop::Loop, 0);
     t.anim.tracks = {firstTrack()};
-    t.slug = slugOf(t.anim.id);
     m_timelines.push_back(std::move(t));
     buildTimeline(m_timelines.back());
-    if (m_tree.find("/generator/shown")) timelinesChanged();
+    if (m_tree.find("/timelines/shown")) timelinesChanged();
     return m_timelines.back().anim.id;
 }
 
@@ -245,7 +255,7 @@ void Device::restoreTimeline(const Animation &timeline, int index)
     t.anim = timeline;
     t.anim.state = AnimState::Stopped;
     t.anim.clock = 0;
-    t.slug = slugOf(t.anim.id);
+    t.slug = claimTimelineName(t.anim.name);
     m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
     const auto at = m_timelines.begin() + std::clamp(index, 0, int(m_timelines.size()));
     buildTimeline(*m_timelines.insert(at, std::move(t)));
@@ -290,7 +300,7 @@ void Device::show(quint64 id)
     const Timeline *t = timeline(id);
     if (!t || t->slug == s.shown) return;
     s.shown = t->slug;
-    m_tree.changed("/generator/shown");
+    m_tree.changed("/timelines/shown");
     tellTimelines();
 }
 
@@ -318,8 +328,8 @@ void Device::buildTimeline(Timeline &tl)
         return m_tree.add(path, std::move(p));
     };
     const auto act = [this](const std::string &path, const char *type, const char *label, const char *description, std::function<bool(const ValueList &)> run) {
-        m_tree.addAction(path, type, [this, path, run = std::move(run)](const ValueList &v) {
-            if (!run(v)) return false;
+        m_tree.addAction(path, type, [this, path, type, run = std::move(run)](const ValueList &v) {
+            if (v.size() < arity(type) || !run(v)) return false;
             said(path, v);
             return true;
         }, description).label = label;
@@ -338,9 +348,30 @@ void Device::buildTimeline(Timeline &tl)
           [](CoreParameter &p) { p.byDefault(Value("Timeline")); });
 
     m_tree.add(b + "/transport").label = "Transport";
-    param(b + "/transport/play", "Play", CoreParameter::Type::Bool, [](const Timeline &t) { return Value(t.anim.state == AnimState::Playing); },
+    param(b + "/transport/playing", "Playing", CoreParameter::Type::Bool, [](const Timeline &t) { return Value(t.anim.state == AnimState::Playing); },
           [](Timeline &t, const Value &v) { t.anim.control(v.truthy() ? AnimAction::Play : AnimAction::Pause); },
           [](CoreParameter &p) { p.transient().byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
+    act(b + "/transport/play", "N", "Play", "Start or resume this timeline", [this, id](const ValueList &) {
+        control(id, AnimAction::Play);
+        return true;
+    });
+    act(b + "/transport/pause", "N", "Pause", "Pause this timeline", [this, id](const ValueList &) {
+        control(id, AnimAction::Pause);
+        return true;
+    });
+    param(b + "/transport/state", "State", CoreParameter::Type::Choice,
+          [](const Timeline &t) {
+              return Value(t.anim.state == AnimState::Playing ? "playing" : t.anim.state == AnimState::Paused ? "paused" : "stopped");
+          }, [](Timeline &, const Value &) {},
+          [](CoreParameter &p) { p.choices({"playing", "paused", "stopped"}).readOnly().transient(); });
+    param(b + "/transport/position", "Position", CoreParameter::Type::Float,
+          [](const Timeline &t) { return Value(t.anim.position()); },
+          [](Timeline &t, const Value &v) {
+              t.anim.control(AnimAction::Seek, t.anim.clockAt(std::clamp(v.number().value_or(0.0), 0.0, t.anim.passDuration())));
+          }, [](CoreParameter &p) { p.range(0, 3600).byDefault(Value(0.0)).transient().unit("time.second"); });
+    param(b + "/transport/played", "Played", CoreParameter::Type::Float,
+          [](const Timeline &t) { return Value(t.anim.played()); }, [](Timeline &, const Value &) {},
+          [](CoreParameter &p) { p.range(0, 360000).readOnly().transient().unit("time.second"); });
     act(b + "/transport/stop", "N", "Stop", "Stops, back to the start", [this, id](const ValueList &) {
         control(id, AnimAction::Stop);
         return true;
@@ -349,28 +380,28 @@ void Device::buildTimeline(Timeline &tl)
         control(id, AnimAction::Rewind);
         return true;
     });
-    act(b + "/transport/seek", "f", "Seek", "Go to a place in the pass it is in (0 to 1)", [this, id](const ValueList &v) {
+    act(b + "/transport/seek", "f", "Seek", "Seek within the current pass, in seconds", [this, id](const ValueList &v) {
         const Timeline *t = timeline(id);
         if (!t) return false;
-        control(id, AnimAction::Seek, t->anim.clockAt(std::clamp(v.at(0).number().value_or(0.0), 0.0, 1.0) * t->anim.passDuration()));
+        control(id, AnimAction::Seek, t->anim.clockAt(std::clamp(v.at(0).number().value_or(0.0), 0.0, t->anim.passDuration())));
         return true;
     });
 
-    m_tree.add(b + "/timeline").label = "Passes";
-    param(b + "/timeline/duration", "Duration", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.duration); },
+    m_tree.add(b + "/settings").label = "Settings";
+    param(b + "/settings/duration", "Duration", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.duration); },
           [](Timeline &t, const Value &v) { t.anim.duration = std::clamp(v.number().value_or(4.0), pxs::core::timeline::Transport::kMinDuration, 3600.0); },
           [](CoreParameter &p) { p.range(0.05, 60).limits(0.05, 3600).step(0.05).unit("time.second").byDefault(Value(4.0)); }).description =
         "Seconds of one pass (what the keys are drawn over)";
-    param(b + "/timeline/loop", "Loop", CoreParameter::Type::Choice, [](const Timeline &t) { return Value(animLoopKey(t.anim.loop).toStdString()); },
+    param(b + "/settings/loop", "Loop", CoreParameter::Type::Choice, [](const Timeline &t) { return Value(animLoopKey(t.anim.loop).toStdString()); },
           [](Timeline &t, const Value &v) { t.anim.setLoop(animLoopFromKey(QString::fromStdString(v.text())), t.anim.repeat); },
           [](CoreParameter &p) { p.choices({"once", "loop", "pingpong"}).byDefault(Value("loop")); }).description = "Once, in a loop, or back and forth";
-    param(b + "/timeline/passes", "Passes (0: endless)", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.anim.repeat); },
+    param(b + "/settings/passes", "Passes (0: endless)", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.anim.repeat); },
           [](Timeline &t, const Value &v) { t.anim.setLoop(t.anim.loop, int(v.number().value_or(0.0))); },
           [](CoreParameter &p) { p.range(0, 100).step(1).byDefault(Value(0)); });
-    param(b + "/timeline/speed", "Speed", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.speed); },
+    param(b + "/settings/speed", "Speed", CoreParameter::Type::Float, [](const Timeline &t) { return Value(t.anim.speed); },
           [](Timeline &t, const Value &v) { t.anim.control(AnimAction::Speed, v.number().value_or(1.0)); },
           [](CoreParameter &p) { p.range(0, 10).step(0.01).byDefault(Value(1.0)); }).description = "0: frozen where it is";
-    param(b + "/timeline/passes_done", "Passes done", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.passesDone); },
+    param(b + "/transport/passes-done", "Passes done", CoreParameter::Type::Int, [](const Timeline &t) { return Value(t.passesDone); },
           [](Timeline &, const Value &) {}, [](CoreParameter &p) { p.readOnly().range(0, 100000); });
 
     m_tree.add(b + "/signals").label = "Signals";
@@ -380,7 +411,11 @@ void Device::buildTimeline(Timeline &tl)
     progress.label = "Progress";
     progress.range = {range(0, 1)};
     m_tree.addSignal(b + "/signals/seconds", "d", "d: seconds played, across the passes").label = "Played";
-    act(b + "/remove", "N", "Remove", "This timeline goes (the last one stays)", [this, id](const ValueList &) { return removeTimeline(id); });
+    act(b + "/remove", "N", "Remove", "Remove this timeline (the last one stays)", [this, id](const ValueList &) {
+        if (m_timelines.size() <= 1) return false;
+        QTimer::singleShot(0, this, [this, id] { removeTimeline(id); });
+        return true;
+    });
     buildTracks(tl);
 }
 
@@ -388,17 +423,25 @@ void Device::buildTracks(Timeline &t)
 {
     const std::string b = base(t) + "/tracks";
     m_tree.remove(b);
-    t.builtTracks = t.anim.tracks.size();
-    t.values.assign(t.anim.tracks.size(), std::numeric_limits<double>::quiet_NaN());
-    Node &group = m_tree.add(b);
-    group.label = "Tracks";
-    group.description = "What each track says now, after its filters (whatever it drives)";
-    for (size_t i = 0; i < t.anim.tracks.size(); ++i) {
-        const AnimTrack &track = t.anim.tracks[i];
-        const QString where = m_destinations && track.layer ? m_destinations->nameOf(track.layer) : QStringLiteral("OSCQlock");
-        Node &v = m_tree.addSignal(b + "/" + std::to_string(i + 1), "f", (where + QStringLiteral(" › ") + track.param).toStdString());
-        v.label = QStringLiteral("Track %1").arg(i + 1).toStdString();
-    }
+    t.values.resize(t.anim.tracks.size(), std::numeric_limits<double>::quiet_NaN());
+    const auto id = t.anim.id;
+    t.trackOutputs = pxs::timeline::declareTrackTree(m_tree, b, t.anim, [this, id]() -> const Animation * {
+        const auto *timeline = this->timeline(id);
+        return timeline ? &timeline->anim : nullptr;
+    }, [this, id](size_t index, AnimTrack track) {
+        const auto *timeline = this->timeline(id);
+        if (!timeline || index >= timeline->anim.tracks.size()) return;
+        auto edited = timeline->anim;
+        edited.tracks[index] = std::move(track);
+        setTimeline(id, edited, false, true);
+    }, [this](const AnimTrack &track) {
+        const auto name = m_destinations && track.layer ? m_destinations->nameOf(track.layer) : QString();
+        const auto target = track.param.isEmpty() ? QStringLiteral("Unassigned") : track.param;
+        return (name.isEmpty() ? target : name + QStringLiteral(" ") + target).toStdString();
+    }, [this, id](size_t index) {
+        const auto *timeline = this->timeline(id);
+        return timeline && index < timeline->values.size() ? timeline->values[index] : std::numeric_limits<double>::quiet_NaN();
+    });
 }
 
 void Device::setDestinations(Destinations *destinations)
@@ -415,21 +458,21 @@ void Device::setDestinations(Destinations *destinations)
 
 void Device::rebuildPresetTargets()
 {
-    m_tree.remove("/devices");
+    m_devicePresetTree.remove("/devices");
     if (!m_destinations) return;
     for (const auto *destination : m_destinations->all()) {
         const quint64 id = destination->id;
         if (m_destinations->isLocalService(*destination)) continue;
         const auto prefix = m_destinations->presetPath(id);
         if (prefix.empty()) continue;
-        m_tree.add(prefix).label = destination->name;
+        m_devicePresetTree.add(prefix).label = destination->name;
         for (const auto &parameter : m_destinations->params(id)) {
             const QString path = parameter.path;
             if (!path.startsWith('/')) continue;
             // Peer apps can publish their own device proxies. Import only their native controls.
             if (destination->kind == pxs::devices::Kind::OscQuery &&
                 (path == QStringLiteral("/devices") || path.startsWith(QStringLiteral("/devices/")))) continue;
-            auto &node = m_tree.add(prefix + path.toStdString());
+            auto &node = m_devicePresetTree.add(prefix + path.toStdString());
             node.type = "d";
             node.access = 3;
             node.label = parameter.label.toStdString();
@@ -452,7 +495,9 @@ void Device::rebuildPresetTargets()
 Device::Said Device::said(const Timeline &t) const
 {
     Said d;
-    d.play = t.anim.state == AnimState::Playing;
+    d.state = t.anim.state;
+    d.position = t.anim.position();
+    d.played = t.anim.played();
     d.duration = t.anim.duration;
     d.loop = int(t.anim.loop);
     d.repeat = t.anim.repeat;
@@ -470,12 +515,15 @@ void Device::tell(const Timeline &t, const Said &before)
     const auto told = [this, &b](bool differs, const char *path) {
         if (differs) m_tree.changed(b + path);
     };
-    told(before.play != now.play, "/transport/play");
-    told(before.duration != now.duration, "/timeline/duration");
-    told(before.loop != now.loop, "/timeline/loop");
-    told(before.repeat != now.repeat, "/timeline/passes");
-    told(before.speed != now.speed, "/timeline/speed");
-    told(before.passesDone != now.passesDone, "/timeline/passes_done");
+    told((before.state == AnimState::Playing) != (now.state == AnimState::Playing), "/transport/playing");
+    told(before.state != now.state, "/transport/state");
+    told(before.position != now.position, "/transport/position");
+    told(before.played != now.played, "/transport/played");
+    told(before.duration != now.duration, "/settings/duration");
+    told(before.loop != now.loop, "/settings/loop");
+    told(before.repeat != now.repeat, "/settings/passes");
+    told(before.speed != now.speed, "/settings/speed");
+    told(before.passesDone != now.passesDone, "/transport/passes-done");
     told(before.name != now.name, "/name");
 }
 
@@ -485,7 +533,7 @@ int Device::passesDone(const Timeline &t) const
     return int(std::floor(std::min(t.anim.clock, t.anim.length()) / t.anim.passDuration() + 1e-9));
 }
 
-void Device::setTimeline(quint64 id, const Animation &edited)
+void Device::setTimeline(quint64 id, const Animation &edited, bool restoreTransport, bool deferTrackTree)
 {
     Timeline *t = find(id);
     if (!t) return;
@@ -493,19 +541,33 @@ void Device::setTimeline(quint64 id, const Animation &edited)
     // What it is comes from the editor, where it is stays (as NyxMap keeps a timeline that is edited while it plays)
     Animation next = edited;
     next.id = t->anim.id;
-    next.state = t->anim.state;
-    next.clock = t->anim.clock;
-    next.oscillatorOffset = t->anim.oscillatorOffset;
-    next.reversed = t->anim.reversed;
-    next.loop = t->anim.loop;
-    next.repeat = t->anim.repeat;
-    next.setLoop(edited.loop, edited.repeat);
-    for (AnimTrack &track : next.tracks) sortAnimKeys(track);
-    bool targets = next.tracks.size() != t->anim.tracks.size();
-    for (size_t i = 0; !targets && i < next.tracks.size(); ++i)
-        targets = next.tracks[i].layer != t->anim.tracks[i].layer || next.tracks[i].param != t->anim.tracks[i].param;
-    t->anim = next;
-    if (targets) buildTracks(*t);
+    if (!restoreTransport) {
+        next.state = t->anim.state;
+        next.clock = t->anim.clock;
+        next.oscillatorOffset = t->anim.oscillatorOffset;
+        next.reversed = t->anim.reversed;
+        next.loop = t->anim.loop;
+        next.repeat = t->anim.repeat;
+        next.setLoop(edited.loop, edited.repeat);
+    } else {
+        const auto prefix = QStringLiteral(":%1:").arg(id);
+        for (auto it = m_filters.begin(); it != m_filters.end();)
+            it = it->first.contains(prefix) ? m_filters.erase(it) : std::next(it);
+    }
+    for (auto &track : next.tracks) {
+        for (auto &key : track.keys) key.t = std::clamp(key.t, 0.0, next.duration);
+        for (auto &axis : track.axes)
+            for (auto &key : axis.keys) key.t = std::clamp(key.t, 0.0, next.duration);
+        sortAnimKeys(track);
+    }
+    const bool rebuild = !pxs::timeline::sameTrackTree(next, t->anim);
+    t->anim = std::move(next);
+    if (auto *node = m_tree.find(base(*t))) node->label = t->anim.name.toStdString();
+    if (rebuild && deferTrackTree) {
+        QTimer::singleShot(0, this, [this, id] { if (auto *timeline = find(id)) buildTracks(*timeline); });
+    } else if (rebuild) {
+        buildTracks(*t);
+    }
     tell(*t, before);
     save();
 }
@@ -517,6 +579,7 @@ void Device::control(quint64 id, AnimAction action, double time)
     const Said before = said(*t);
     t->anim.control(action, time);
     tell(*t, before);
+    save();
 }
 
 AnimationPlayback Device::playback(quint64 id) const
@@ -549,7 +612,7 @@ std::vector<::ParamInfo> Device::animatableParams(quint64 holder) const
     if (holder && m_destinations) return m_destinations->params(holder);
     ::ParamInfo p;
     p.path = "output";
-    p.label = "Output (its own signal, /generator/<timeline>/tracks/<n>)";
+    p.label = "Output (its own signal, /timelines/<timeline>/tracks/<n>)";
     p.min = 0;
     p.max = 1;
     p.lo = -1;
@@ -656,6 +719,7 @@ void Device::sequenceChanged()
 void Device::stopAll()
 {
     m_presetPlayback.clear();
+    m_devicePlayback.clear();
     m_sequencer.stopAll();
     for (Timeline &t : m_timelines)
         if (t.anim.state != AnimState::Stopped) control(t.anim.id, AnimAction::Stop);
@@ -698,21 +762,25 @@ double Device::animationRemaining(quint64 id) const
 
 // ---- a show, and what is kept between launches: the timelines (their transport, their tracks and what each drives) and the cues
 
-QJsonArray Device::timelinesJson() const
+QJsonArray Device::timelinesJson(bool includeTransport) const
 {
     QJsonArray list;
-    for (const Timeline &t : m_timelines) list.append(animationDefinitionToJson(t.anim));
+    for (const Timeline &t : m_timelines) {
+        auto data = includeTransport ? animationSnapshotToJson(t.anim) : animationDefinitionToJson(t.anim);
+        data["slug"] = QString::fromStdString(t.slug);
+        list.append(data);
+    }
     return list;
 }
 
 void Device::readTimelines(const QJsonArray &list)
 {
     for (const QJsonValue &v : list) {
-        const auto animation = animationDefinitionFromJson(v.toObject());
+        const auto animation = animationSnapshotFromJson(v.toObject());
         if (!animation || timeline(animation->id)) continue;
         Timeline t;
         t.anim = *animation;
-        t.slug = slugOf(t.anim.id);
+        t.slug = claimTimelineName(v.toObject().value("slug").toString());
         m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
         m_timelines.push_back(std::move(t));
         buildTimeline(m_timelines.back());
@@ -791,7 +859,8 @@ bool Device::applyPreset(int index, double fade, const pxs::core::tree::Preset &
         qWarning().noquote() << message;
     };
     for (const auto &[path, value] : preset.values) {
-        const auto *node = m_tree.find(path);
+        const auto &tree = path.rfind("/devices/", 0) == 0 ? m_devicePresetTree : m_tree;
+        const auto *node = tree.find(path);
         if (!node || node->locked) {
             reject(path);
             return false;
@@ -809,9 +878,16 @@ bool Device::applyPreset(int index, double fade, const pxs::core::tree::Preset &
         reject("timeline");
         return false;
     }
-    for (const auto &animation : *definitions) setTimeline(animation.id, animation);
+    for (const auto &animation : *definitions) setTimeline(animation.id, animation, true);
     if (!definitions->empty()) timelinesChanged();
-    m_presetPlayback.start(m_tree, preset);
+    auto local = preset, devices = preset;
+    local.values.clear();
+    devices.values.clear();
+    devices.actions.clear();
+    for (const auto &[path, value] : preset.values)
+        (path.rfind("/devices/", 0) == 0 ? devices : local).values.emplace(path, value);
+    m_presetPlayback.start(m_tree, local);
+    m_devicePlayback.start(m_devicePresetTree, devices);
     return true;
 }
 
@@ -836,6 +912,7 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     s.shown = show.value("shown").toString().toStdString();
     readSequence(show);
     m_presetPlayback.clear();
+    m_devicePlayback.clear();
     readPresets(show.value("presets").toArray());
     timelinesChanged();
     sequenceChanged();
@@ -847,7 +924,7 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
 
 QByteArray Device::snapshot() const
 {
-    return QJsonDocument(QJsonObject{{"timelines", timelinesJson()},
+    return QJsonDocument(QJsonObject{{"timelines", timelinesJson(false)},
                                      {"sequences", m_sequencer.toJson()},
                                      {"presets", presetsJson()},
                                      {"devices", m_destinations ? m_destinations->showJson() : QJsonArray()}})
@@ -915,13 +992,14 @@ void Device::buildUi()
     action("/ui/tab/previous", "N", "Previous tab", "The tab before, round", [move](const ValueList &) { return move(-1); });
 }
 
-// ---- the generator itself
+// ---- timeline playback
 
 void Device::tick()
 {
     const double dt = m_clock.restart() / 1000.0;
     m_up += dt;
     m_presetPlayback.advance(m_tree, dt);
+    m_devicePlayback.advance(m_devicePresetTree, dt);
     m_sequencer.advance(dt); // its waits, on this thread (fadesManual)
     for (Timeline &t : m_timelines) {
         const std::string b = base(t);
@@ -938,15 +1016,17 @@ void Device::tick()
             }
             tell(t, before);
         }
-        if (t.builtTracks != t.anim.tracks.size()) buildTracks(t);
+        if (t.trackOutputs.size() != t.anim.tracks.size()) buildTracks(t);
         const double position = t.anim.position(), played = t.anim.played();
         for (size_t i = 0; i < t.anim.tracks.size(); ++i) {
             const AnimTrack &track = t.anim.tracks[i];
             if (!track.enabled || track.param.isEmpty() || track.event || track.color || track.isPoint()) continue;
             const double v = filtered(t, i, track.valueAt(position, played), dt);
             if (!std::isfinite(v)) continue;
-            t.values[i] = v;
-            m_tree.fire(b + "/tracks/" + std::to_string(i + 1), {Value(float(v))});
+            if (t.values[i] != v) {
+                t.values[i] = v;
+                m_tree.changed(t.trackOutputs[i]);
+            }
             if (track.layer && m_destinations) m_destinations->send(track.layer, track.param, v);
         }
         m_tree.fire(b + "/signals/progress", {Value(t.anim.progress())});

@@ -1,5 +1,5 @@
 #pragma once
-// The first tab: the timelines, a sub-tab each (+ makes one, double-click renames, ✕ removes; the sub-tab shown is /generator/shown, so
+// The first tab: the timelines, a sub-tab each (+ makes one, double-click renames, ✕ removes; the sub-tab shown is /timelines/shown, so
 // OSC moves it too), and the one shown in pxs-qt's editor (NyxMap's): its transport, its passes, and its tracks, each with what it drives
 // (OSCQlock's own output, or a number of a device of the network: Destinations.h) and its filters. The editor edits the Device's
 // timeline, and the Device tells the tree what changed: an edit here is an OSC feedback like any other.
@@ -35,11 +35,11 @@ private:
     int m_observer = 0;
 };
 
-class GeneratorPage : public QWidget
+class TimelinesPage : public QWidget
 {
 public:
-    GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
-    ~GeneratorPage() override;
+    TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent = nullptr);
+    ~TimelinesPage() override;
     void setInspectorSink(std::function<void(quint64)> sink) { m_inspectorSink = std::move(sink); }
     void tick(); // a step of the device (the window calls it)
 

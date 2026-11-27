@@ -10,7 +10,7 @@
 #include <QJsonDocument>
 #include <QTabWidget>
 #include "Commands.h"
-#include "GeneratorEditor.h"
+#include "TimelinesEditor.h"
 #include "Show.h"
 
 #include <pxs/OscService.h>
@@ -64,7 +64,7 @@ namespace {
 // to be tried before it is published
 int selfTest()
 {
-    Device device;
+    Device device(nullptr, false);
     const std::vector<std::string> problems = device.tree().check();
     for (const std::string &problem : problems) std::fprintf(stderr, "OSCQlock: the tree lacks something: %s\n", problem.c_str());
     pxs::OscService service(&device.tree(), QStringLiteral("OSCQlock"));
@@ -95,12 +95,26 @@ int selfTest()
     device.setTimeline(first, edited);
     device.control(first, AnimAction::Play);
     const auto saw = [&told](const char *path) { return std::find(told.begin(), told.end(), path) != told.end(); };
-    bool feedback = saw("/generator/timeline1/timeline/duration") && saw("/generator/timeline1/transport/play");
+    bool feedback = saw("/timelines/timeline/settings/duration") && saw("/timelines/timeline/transport/playing");
     if (!feedback) std::fprintf(stderr, "OSCQlock: an edit of the timeline was not told to the tree\n");
 
+    const char *transport = "/timelines/timeline/transport/";
+    const auto applyTransport = [&device, transport](const char *action, const ValueList &args = {}) {
+        return device.tree().apply(std::string(transport) + action, args) == 1;
+    };
+    const char *point = "/timelines/timeline/tracks/output/curve/points/point/value";
+    const auto *pointNode = device.tree().find(point);
+    const bool transportOk = pointNode && pointNode->parameter() && device.tree().apply(point, {Value(0.2)}) == 1
+        && std::abs(device.timeline(first)->anim.tracks.front().keys.front().v - 0.2) < 1e-6
+        && applyTransport("pause") && device.timeline(first)->anim.state == AnimState::Paused
+        && applyTransport("seek", {Value(0.75)}) && device.timeline(first)->anim.position() == 0.75
+        && applyTransport("rewind") && device.timeline(first)->anim.position() == 0
+        && applyTransport("play") && device.timeline(first)->anim.state == AnimState::Playing;
+    if (!transportOk) std::fprintf(stderr, "OSCQlock: a timeline point or transport action failed\n");
+
     // A timeline more, by OSC: its nodes are made, and it is the one shown
-    const bool made = device.tree().apply("/generator/new", {}) == 1 && device.timelines().size() == 2 && device.tree().find("/generator/timeline2/transport/play") &&
-                      device.tree().find("/generator/shown")->get().front().text() == "timeline2" && device.tree().apply("/generator/shown", {Value("timeline1")}) == 1 &&
+    const bool made = device.tree().apply("/timelines/new", {}) == 1 && device.timelines().size() == 2 && device.tree().find("/timelines/timeline-a/transport/playing") &&
+                      device.tree().find("/timelines/shown")->get().front().text() == "timeline-a" && device.tree().apply("/timelines/shown", {Value("timeline")}) == 1 &&
                       device.shown() == first;
     if (!made) std::fprintf(stderr, "OSCQlock: a timeline made by OSC is not there, or not shown\n");
 
@@ -139,7 +153,7 @@ int selfTest()
         QTimer::singleShot(3000, &wait, &QEventLoop::quit);
         wait.exec();
     }
-    const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/generator/timeline1/tracks/2");
+    const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/timelines/timeline/tracks/receiver-level/output");
     if (!sent) std::fprintf(stderr, "OSCQlock: a track did not reach its OSC device through its filter (received %g)\n", received);
 
     // A track that drives an OSCQuery device: OSCQlock itself, added by its address (its namespace read, then written over OSC). A number
@@ -156,9 +170,9 @@ int selfTest()
     Animation driving = device.timelines().front().anim;
     AnimTrack number, onOff;
     number.layer = onOff.layer = query;
-    number.param = QStringLiteral("/generator/timeline2/timeline/speed");
+    number.param = QStringLiteral("/timelines/timeline-a/settings/speed");
     number.keys = {AnimKey{0, 0.25, 0}};
-    onOff.param = QStringLiteral("/generator/timeline2/transport/play");
+    onOff.param = QStringLiteral("/timelines/timeline-a/transport/playing");
     onOff.keys = {AnimKey{0, 1, 0}};
     driving.tracks.push_back(number);
     driving.tracks.push_back(onOff);
@@ -171,16 +185,16 @@ int selfTest()
         QEventLoop wait;
         QTimer poll;
         QObject::connect(&poll, &QTimer::timeout, &wait, [&] {
-            if (std::abs(value("/generator/timeline2/timeline/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/generator/timeline2/transport/play").truthy()) wait.quit();
+            if (std::abs(value("/timelines/timeline-a/settings/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/timelines/timeline-a/transport/playing").truthy()) wait.quit();
         });
         poll.start(20);
         QTimer::singleShot(5000, &wait, &QEventLoop::quit);
         wait.exec();
     }
     const bool queried = destinations.online(query) && !destinations.params(query).empty() &&
-                         std::abs(value("/generator/timeline2/timeline/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/generator/timeline2/transport/play").truthy();
+                         std::abs(value("/timelines/timeline-a/settings/speed").number().value_or(-1) - 0.25) < 1e-4 && value("/timelines/timeline-a/transport/playing").truthy();
     if (!queried) std::fprintf(stderr, "OSCQlock: a track did not reach its OSCQuery device (float %g, switch %d)\n",
-                               value("/generator/timeline2/timeline/speed").number().value_or(-1), int(value("/generator/timeline2/transport/play").truthy()));
+                               value("/timelines/timeline-a/settings/speed").number().value_or(-1), int(value("/timelines/timeline-a/transport/playing").truthy()));
 
     // The sequence (NyxMap's), by OSC: GO plays the first step (a timeline plays), which follows: the second stops it
     Sequencer::Sequence cueList = device.sequencer().sequence(0);
@@ -212,15 +226,18 @@ int selfTest()
     const QString file = dir.filePath(QStringLiteral("check.oscqlock"));
     QString why;
     const size_t timelines = device.timelines().size(), tracks = device.timelines().front().anim.tracks.size();
+    device.control(first, AnimAction::Play);
+    device.control(first, AnimAction::Seek, 0.625);
     bool shown = show::save(file, device, destinations, &why);
     device.addTimeline(QStringLiteral("not in the show"));
     shown = shown && show::open(file, device, destinations, &why) && device.timelines().size() == timelines &&
             device.timelines().front().anim.tracks.size() == tracks && device.sequencer().sequence(0).steps.size() == 2 &&
             device.sequencer().sequence(0).steps[1].description == QLatin1String("Blackout") &&
-            device.timelines().front().anim.tracks[1].layer == destinations.all().back()->id;
+            device.timelines().front().anim.tracks[1].layer == destinations.all().back()->id &&
+            device.timeline(first)->anim.state == AnimState::Playing && device.timeline(first)->anim.clock == 0.625;
     // Opened, it is not modified; playing does not modify it; a step edited does
     shown = shown && !device.modified();
-    device.control(first, AnimAction::Play);
+    device.control(first, AnimAction::Pause);
     shown = shown && !device.modified();
     Sequencer::Sequence shorter = device.sequencer().sequence(0);
     shorter.steps.pop_back();
@@ -233,10 +250,10 @@ int selfTest()
     QUndoStack history;
     const Animation second = device.timelines()[1].anim;
     history.push(new cmd::TimelineThere(&device, second, 1, false));
-    bool undone = !device.timeline(second.id) && !device.tree().find("/generator/timeline2");
+    bool undone = !device.timeline(second.id) && !device.tree().find("/timelines/timeline-a");
     history.undo();
     undone = undone && device.timeline(second.id) && device.timelines()[1].anim.id == second.id &&
-             device.timelines()[1].anim.tracks.size() == second.tracks.size() && device.tree().find("/generator/timeline2/transport/play");
+             device.timelines()[1].anim.tracks.size() == second.tracks.size() && device.tree().find("/timelines/timeline-a/transport/playing");
     const Sequencer::Sequence was = device.sequencer().sequence(0);
     Sequencer::Sequence more = was;
     Sequencer::Step one;
@@ -252,8 +269,8 @@ int selfTest()
 
     device.stopAll();
     const auto address = destinations.presetPath(osc) + "/level";
-    const bool writable = device.tree().apply(address, {Value(0.2)}) == 1;
-    auto preset = pxs::core::tree::capture(device.tree(), {address});
+    const bool writable = device.devicePresetTree().apply(address, {Value(0.2)}) == 1;
+    auto preset = pxs::core::tree::capture(device.devicePresetTree(), {address});
     preset.id = "12345";
     preset.fade = 1;
     device.setPresets({preset});
@@ -267,7 +284,7 @@ int selfTest()
     const auto encoded = Sequencer::stepToJson(recall);
     const bool timed = address == "/devices/receiver/level" && writable && preset.values.count(address) && encoded.contains("preset_overrides")
         && device.sequencer().goTo(0)
-        && device.tree().find(address)->get().front().number() == 0.75;
+        && device.devicePresetTree().find(address)->get().front().number() == 0.75;
     if (!timed) std::fprintf(stderr, "OSCQlock: preset capture or step override failed\n");
 
     pxs::devices::Device fixture;
@@ -298,19 +315,23 @@ int selfTest()
     auto timelinePreset = pxs::core::tree::Preset{};
     timelinePreset.id = "12346";
     timelinePreset.scope = "timeline:" + std::to_string(remapped.id);
+    remapped.state = AnimState::Playing;
+    remapped.clock = 0.375;
     timelinePreset.timelines[std::to_string(remapped.id)] =
-        QJsonDocument(animationDefinitionToJson(remapped)).toJson(QJsonDocument::Compact).toStdString();
+        QJsonDocument(animationSnapshotToJson(remapped)).toJson(QJsonDocument::Compact).toStdString();
     device.setPresets({pxs::core::tree::Preset::fromJson(timelinePreset.toJson())});
     auto stripped = remapped;
     stripped.tracks.clear();
     device.setTimeline(stripped.id, stripped);
-    const bool restored = device.applyPreset(0)
+    const bool restored = !device.tree().find("/devices") && device.applyPreset(0)
         && device.timeline(remapped.id)->anim.tracks.size() == 1
-        && device.timeline(remapped.id)->anim.tracks.front().dataFilters == dimmerTrack.dataFilters;
+        && device.timeline(remapped.id)->anim.tracks.front().dataFilters == dimmerTrack.dataFilters
+        && device.timeline(remapped.id)->anim.state == AnimState::Playing
+        && device.timeline(remapped.id)->anim.clock == remapped.clock;
     if (!restored) std::fprintf(stderr, "OSCQlock: timeline preset recall did not restore the track and its filters\n");
 
     device.tree().removeObserver(watching);
-    feedback = feedback && made && sent && queried && cued && shown && undone && timed && scaled && restored;
+    feedback = feedback && transportOk && made && sent && queried && cued && shown && undone && timed && scaled && restored;
 
     const auto *tab = device.tree().find("/ui/tab");
     const bool named = tab && device.tree().apply("/ui/tab", {Value("timelines")}) == 1
@@ -338,7 +359,7 @@ int main(int argc, char **argv)
     ignoreWheelOnFields(&app);
 
     QCommandLineParser cli;
-    cli.setApplicationDescription("A device to test OSC and OSCQuery controllers on: a generator with every kind of node, parameter, action and signal.");
+    cli.setApplicationDescription("Timeline and cue playback with OSC, MIDI and DMX.");
     cli.addHelpOption();
     cli.addVersionOption();
     QCommandLineOption name({"n", "name"}, "The name it announces on the network.", "name", "OSCQlock");
@@ -427,7 +448,7 @@ int main(int argc, char **argv)
 
         // Undo / redo: what is edited in the window (timelines, the sequence), Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z
         auto *undo = new QUndoStack(&window);
-        auto *generator = new GeneratorPage(&device, undo);
+        auto *timelinesPage = new TimelinesPage(&device, undo);
         // The cue list: pxs's view of NyxMap's sequencer, its steps driving these timelines
         struct SequenceTargets : pxs::sequenceview::SequenceViewHost {
             Device *device;
@@ -462,12 +483,13 @@ int main(int argc, char **argv)
                 for (const auto &timeline : device.timelines()) out.emplace_back(timeline.anim.id, timeline.anim.name);
                 return out;
             }
+            pxs::core::tree::Tree *deviceParameters() const override { return &device.devicePresetTree(); }
             std::optional<Animation> readTimeline(quint64 id) const override
             {
                 if (const auto *timeline = device.timeline(id)) return timeline->anim;
                 return std::nullopt;
             }
-            void restoreTimeline(const Animation &animation) override { device.setTimeline(animation.id, animation); }
+            void restoreTimeline(const Animation &animation) override { device.setTimeline(animation.id, animation, true); }
             std::vector<std::pair<QString, QString>> scopes() const override
             {
                 std::vector<std::pair<QString, QString>> out{{{}, QStringLiteral("All known parameters")},
@@ -540,7 +562,7 @@ int main(int argc, char **argv)
         upper->setSizes({260, 550, 215});
         auto *workspace = new QSplitter(Qt::Vertical);
         workspace->addWidget(upper);
-        workspace->addWidget(titled(QStringLiteral("Timelines"), generator));
+        workspace->addWidget(titled(QStringLiteral("Timelines"), timelinesPage));
         workspace->setSizes({440, 340});
         auto *inspector = new QStackedWidget;
         inspector->addWidget(presetView->inspector());
@@ -561,7 +583,7 @@ int main(int argc, char **argv)
         });
         QObject::connect(patchPanel, &pxs::devices::DevicesPanel::deviceSelected, inspector,
                          [inspector, patchPanel](quint64) { inspector->setCurrentWidget(patchPanel->inspector()); });
-        generator->setInspectorSink([&device, showDetails](quint64 id) {
+        timelinesPage->setInspectorSink([&device, showDetails](quint64 id) {
             device.tree().apply("/ui/tab", {Value("timelines")});
             const auto *timeline = device.timeline(id);
             if (!timeline) return;
@@ -657,8 +679,8 @@ int main(int argc, char **argv)
             undo->clear(); // another show: what was done before is not undone in it
             title();
         });
-        device.onTick([generator, title] {
-            generator->tick();
+        device.onTick([timelinesPage, title] {
+            timelinesPage->tick();
             title();
         });
         title();
@@ -671,11 +693,11 @@ int main(int argc, char **argv)
         editMenu->addAction(redoAction);
 
         window.resize(1480, 860);
-        const auto focusSection = [generator, sequence, presetView](const pxs::core::tree::Node &node, const auto &) {
+        const auto focusSection = [timelinesPage, sequence, presetView](const pxs::core::tree::Node &node, const auto &) {
             if (node.path() != "/ui/tab") return;
             const auto tab = node.get().front().text();
             QWidget *section = tab == "sequence" ? static_cast<QWidget *>(sequence)
-                : tab == "presets" ? static_cast<QWidget *>(presetView) : static_cast<QWidget *>(generator);
+                : tab == "presets" ? static_cast<QWidget *>(presetView) : static_cast<QWidget *>(timelinesPage);
             if (auto *focused = QApplication::focusWidget(); focused && (focused == section || section->isAncestorOf(focused))) return;
             section->setFocus(Qt::OtherFocusReason);
         };

@@ -36,16 +36,17 @@ parameter tree and the dark look of the Pixel Stereo applications.
 The window can be resized. **Open…**, **Save**, **Save as…** keep a show in a file (`.oscqlock`: its timelines, its sequence, the devices it
 drives); what is done is also kept between launches. `--show file` opens one at start, with or without a window (`--no-window`).
 
-Everything is a node of OSCQlock's own tree, so a controller drives it as it drives anything else. The tab is `/ui/tab` (`generator`,
-`sequence`), with the actions `/ui/tab/next` and `/ui/tab/previous`.
+OSCQlock publishes its own controls through OSCQuery. The tab is `/ui/tab` (`timelines`, `sequence`, `presets`),
+with the actions `/ui/tab/next` and `/ui/tab/previous`.
 
 | Tab | Under | What |
 |---|---|---|
-| **Generator** | the timelines | **as many timelines as one wants**, a sub-tab each (**+** makes one, double-click renames, **×** removes; the last one stays), NyxMap's (pxs-core's logic, pxs-qt's editor). Each has **tracks**: keys or a wave, and **filters** (pxs-core's: smoothing, shape, timing, triggers), each track driving OSCQlock's own output or **a number of a device of the network** (the **Devices** window, below). The editor and the nodes below edit the same timeline: each change is told to the tree (OSC feedback) |
-| | `/generator/shown` | the sub-tab shown (a choice of the slugs, `timeline1`, `timeline2`…), that holds the actions `next` and `previous` |
-| | `/generator/new`, `new_named`, `remove` | actions: a timeline more (`N`, or named: `s`), shown; a timeline removed by its slug (`s`). `last_action` (`s`): a signal, the last action received |
-| | `/generator/<slug>` | one timeline: `name` (text); `transport/play` (on: plays, off: pauses), `stop`, `rewind`, `seek` (`f`, in the pass); `timeline/duration` (s, of a pass), `loop` (`once loop pingpong`), `passes` (0: endless), `speed`, `passes_done` (only read); `remove` |
-| | `/generator/<slug>/tracks`, `signals` | signals: `tracks/1`, `2`… what each track says now, after its filters (`f`); `signals/cycle` (a pass starts) and `done` (`N`), `progress` (`f`, in the pass), `seconds` (`d`, played) |
+| **Timelines** | `/timelines/shown` | The displayed timeline, selected by its address name. Actions `next` and `previous` cycle through the available timelines. |
+| | `/timelines/new`, `new-named`, `remove` | Create a timeline, create one with a given name (`s`), or remove one by its address name (`s`). |
+| | `/timelines/<name>/settings` | Duration in seconds, loop mode, pass count (0 is endless), and speed. |
+| | `/timelines/<name>/transport` | Actions `play`, `pause`, `stop`, `rewind`, and `seek` (seconds in the current pass). Parameters show playback state, position, time played, and completed passes. |
+| | `/timelines/<name>/tracks/<target>` | Track target, enable state, curve points, wave settings, and filters. `output` shows the value after filters. |
+| | `/timelines/<name>/signals` | `cycle` and `done` impulses, progress in the current pass, and total seconds played. |
 | **Sequence** | the cue list | NyxMap's sequencer (pxs-qt's `pxs::sequence`), shown by pxs-qt's `pxs::sequenceview`: a step has a text, a **pre-wait** after its GO, what it **does** to a timeline (play, pause, stop, rewind, seek, loop mode, speed), a **post-wait**, and **then**: **GO** (wait for GO), or **AUTO** (a double-click flips it) (the next step gets its GO once this one's action, the time its timeline plays, and its post-wait are over). **GO** (space bar) plays the step on standby (red), **GO BACK** the one before, **Stop** stops the waits, **Stop all** (Escape) the waits and every timeline; a double-click on a step's number plays it |
 | | `/sequence/go`, `back`, `stop`, `stop_all` | actions (`N`), as the buttons |
 | | `/sequence/step` | `i`: plays the step of that number |
@@ -54,13 +55,13 @@ Everything is a node of OSCQlock's own tree, so a controller drives it as it dri
 
 ## Devices: where the tracks send
 
-The **Devices** button (top right) opens the devices a track can drive. The **OSCQuery** devices of the network appear by themselves (mDNS):
+The **Device Manager** tab shows the devices a track can drive. Device namespaces are kept inside OSCQlock. The **OSCQuery** devices of the network appear by themselves (mDNS):
 their namespace is read, and a track can drive any number of them that can be written (sent over OSC to the port they say). One that is
 not announced is added by its address (**+ OSCQuery…**, `host:port`). A **plain OSC** device is made here (**+ OSC**): a name, a host, a
 UDP port, and the addresses it takes, each with its type (a number `f`, a whole number `i`, on / off `T`/`F`) and its range. In a track,
 the button above its settings chooses what it drives: OSCQlock's own output, or a device and one of its numbers. A value is sent when it
 changes, after the track's filters. The OSC devices, the OSCQuery ones added by hand, the timelines and the sequence are kept between launches, and in a show file.
 
-`--screenshot file.png` saves a picture of the window and exits (`--tab sequence`: that tab; `--tab devices`: the Devices window).
+`--screenshot file.png` saves a picture of the window and exits (`--tab sequence`: that tab; `--tab devices`: the Device Manager tab).
 
 Every numeric parameter says its range and default (a reset is writing `DEFAULT_VALUE`); the tree is checked at start (`Tree::check()`), and `--check` fails when it lacks something.

@@ -20,7 +20,7 @@ public:
     Destinations(const QString &selfName, quint16 selfPort, bool persistent = true, QObject *parent = nullptr);
     pxs::devices::Devices &manager() { return m_devices; }
     const pxs::devices::Devices &manager() const { return m_devices; }
-    void startDiscovery() { m_devices.startDiscovery(); }
+    void startDiscovery();
     auto all() const { return m_devices.all(); }
     auto find(quint64 id) const { return m_devices.find(id); }
     QString nameOf(quint64 id) const { return m_devices.nameOf(id); }

@@ -1,4 +1,4 @@
-#include "GeneratorEditor.h"
+#include "TimelinesEditor.h"
 
 #include "Commands.h"
 #include "Destinations.h"
@@ -213,9 +213,11 @@ TimelineEditor::TimelineEditor(Device *device, QUndoStack *undo, QWidget *parent
 
     // What OSC or the parameters change is shown at once; the playhead moves with the device's steps
     m_observer = device->tree().addObserver([this](const pxs::core::tree::Node &node, const pxs::core::ValueList &) {
-        if (isCommitting() || node.kind() != pxs::core::tree::Kind::Parameter || !m_id) return;
+        if (isCommitting() || node.kind() != pxs::core::tree::Kind::Parameter || node.access != 3 || !m_id) return;
         const Device::Timeline *t = m_device->timeline(m_id);
-        if (t && node.path().rfind("/generator/" + t->slug + "/", 0) == 0) reload();
+        if (!t) return;
+        const auto prefix = "/timelines/" + t->slug + "/";
+        if (node.path().rfind(prefix, 0) == 0 && node.path().rfind(prefix + "transport/", 0) != 0) reload();
     });
 }
 
@@ -310,7 +312,7 @@ private:
 };
 }
 
-GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) : QWidget(parent), m_device(device), m_undo(undo)
+TimelinesPage::TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent) : QWidget(parent), m_device(device), m_undo(undo)
 {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 6, 0, 0);
@@ -323,7 +325,7 @@ GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) 
     m_tabs->setDocumentMode(true);
     m_tabs->setExpanding(false);
     m_tabs->setUsesScrollButtons(true);
-    m_tabs->setToolTip(QStringLiteral("The timelines (/generator/shown). Double-click: rename"));
+    m_tabs->setToolTip(QStringLiteral("The timelines (/timelines/shown). Double-click: rename"));
     m_tabs->setDrawBase(false);
     setStyleSheet(QStringLiteral(
         "QTabBar#timelines::tab { background: #24262b; color: #a9adb6; border: 1px solid #33363d; border-radius: 13px; padding: 4px 10px 4px 14px;"
@@ -339,7 +341,7 @@ GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) 
     auto *add = new QToolButton;
     add->setText(QStringLiteral("+"));
     add->setObjectName(QStringLiteral("newTimeline"));
-    add->setToolTip(QStringLiteral("A new timeline (/generator/new)"));
+    add->setToolTip(QStringLiteral("A new timeline (/timelines/new)"));
     bar->addWidget(add);
     m_status = new QLabel;
     m_status->setObjectName(QStringLiteral("caption"));
@@ -380,7 +382,7 @@ GeneratorPage::GeneratorPage(Device *device, QUndoStack *undo, QWidget *parent) 
 }
 
 // A step of the device: the playhead, ▶ on the sub-tabs of the timelines that play, what was sent
-void GeneratorPage::tick()
+void TimelinesPage::tick()
 {
     m_editor->poll();
     // What each timeline does, on its sub-tab: ▶ while it plays
@@ -392,13 +394,13 @@ void GeneratorPage::tick()
     if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
 }
 
-GeneratorPage::~GeneratorPage()
+TimelinesPage::~TimelinesPage()
 {
     m_device->forgetTimelinesListener(m_listener);
     m_device->onTick(nullptr);
 }
 
-void GeneratorPage::sync()
+void TimelinesPage::sync()
 {
     m_syncing = true;
     const auto &all = m_device->timelines();
@@ -407,8 +409,8 @@ void GeneratorPage::sync()
         if (int(i) >= m_tabs->count()) m_tabs->addTab(QString());
         m_tabs->setTabText(int(i), all[i].anim.name);
         m_tabs->setTabData(int(i), QVariant::fromValue<qulonglong>(all[i].anim.id));
-        m_tabs->setTabToolTip(int(i), QStringLiteral("/generator/%1  ·  double-click to rename").arg(QString::fromStdString(all[i].slug)));
-        // A small ✕ to remove it (/generator/<slug>/remove); the last one stays, without one
+        m_tabs->setTabToolTip(int(i), QStringLiteral("/timelines/%1  ·  double-click to rename").arg(QString::fromStdString(all[i].slug)));
+        // A small ✕ to remove it (/timelines/<slug>/remove); the last one stays, without one
         auto *close = qobject_cast<QToolButton *>(m_tabs->tabButton(int(i), QTabBar::RightSide));
         if (!close) {
             close = new QToolButton;

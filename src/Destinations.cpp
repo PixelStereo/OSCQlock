@@ -1,5 +1,6 @@
 #include "Destinations.h"
 #include "Show.h"
+#include <pxs/Discovery.h>
 
 #include <QJsonDocument>
 #include <QHostInfo>
@@ -29,6 +30,14 @@ Destinations::Destinations(const QString &name, quint16 port, bool persistent, Q
         emit changed();
     });
     connect(&m_devices, &pxs::devices::Devices::dmxChanged, this, &Destinations::submit);
+}
+
+void Destinations::startDiscovery()
+{
+    m_devices.setDiscoveryFilter([](const pxs::oscquery::Device &device) {
+        return device.name.compare(QStringLiteral("Demo device"), Qt::CaseInsensitive) != 0;
+    });
+    m_devices.startDiscovery();
 }
 
 void Destinations::namePresetTargets()

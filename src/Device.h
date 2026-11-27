@@ -2,8 +2,8 @@
 // OSCQlock: timelines that drive the devices of the network (OSC and OSCQuery), played by hand, by a cue list or by OSC. Everything it is
 // and does is a node of its own tree (an OSCQuery device itself), so that a controller drives it as it drives anything else:
 //
-//   /generator   the timelines: as many as one wants, each a sub-tab of the first tab and a node /generator/<slug> (its name, transport,
-//                passes, tracks, signals). /generator/shown is the sub-tab shown; /generator/new, new_named, remove make and remove them.
+//   /timelines   the timelines: as many as one wants, each a sub-tab of the first tab and a node /timelines/<slug> (its name, transport,
+//                passes, tracks, signals). /timelines/shown is the sub-tab shown; /timelines/new, new-named, remove make and remove them.
 //                Their tracks drive OSCQlock's own outputs or the devices of the network (Destinations.h), through the filters of pxs-core
 //   /sequence    the cue list, NyxMap's sequencer (pxs/Sequencer.h): go, back, stop, stop_all, step (a step by its number); where it is,
 //                the step GO plays next, how many steps
@@ -35,7 +35,7 @@
 
 class Destinations;
 
-// The timelines are NyxMap's (pxs-core's logic, pxs-qt's editor). Each is a node of /generator with its settings and its transport as
+// The timelines are NyxMap's (pxs-core's logic, pxs-qt's editor). Each is a node of /timelines with its settings and its transport as
 // parameters, and the editor of the window edits the same timeline: both say every change to the tree.
 class Device : public QObject, public TimelineHost, public SequencerHost
 {
@@ -46,10 +46,10 @@ public:
 
     struct Timeline {
         Animation anim;             // its id, name, transport and tracks
-        std::string slug;           // its node: /generator/<slug>
+        std::string slug;           // its node: /timelines/<slug>
         std::vector<double> values; // each track's value now, after its filters
         int passesDone = 0;
-        size_t builtTracks = 0;     // the track nodes made
+        std::vector<std::string> trackOutputs;
     };
     const std::vector<Timeline> &timelines() const { return m_timelines; }
     const Timeline *timeline(quint64 id) const;
@@ -57,7 +57,7 @@ public:
     bool removeTimeline(quint64 id);               // the last one stays
     void restoreTimeline(const Animation &timeline, int index); // one removed, back at its place (undo), with its id
     void renameTimeline(quint64 id, const QString &name);
-    quint64 shown() const; // the sub-tab shown (/generator/shown)
+    quint64 shown() const; // the sub-tab shown (/timelines/shown)
     void show(quint64 id);
     // The list changed (added, removed, renamed, another shown): the window's sub-tabs, the cues' timelines. An id for forgetTimelinesListener
     int addTimelinesListener(std::function<void()> callback)
@@ -72,7 +72,7 @@ public:
     }
 
     // A timeline as the editor reads it and writes it back (it keeps where it is: its state, its clock)
-    void setTimeline(quint64 id, const Animation &edited);
+    void setTimeline(quint64 id, const Animation &edited, bool restoreTransport = false, bool deferTrackTree = false);
     void control(quint64 id, AnimAction action, double time = 0);
     AnimationPlayback playback(quint64 id) const;
     // Told after each step (the window's playhead)
@@ -80,7 +80,7 @@ public:
     void setDestinations(Destinations *destinations); // the track nodes say the devices' names
     Destinations *destinations() const { return m_destinations; }
 
-    // TimelineHost: what a track drives. Holder 0 is OSCQlock's own output (its signal /generator/<slug>/tracks/<n>/value), the others are
+    // TimelineHost: what a track drives. Holder 0 is OSCQlock's own output (its signal /timelines/<slug>/tracks/<n>/value), the others are
     // the devices of Destinations
     std::vector<ParamInfo> animatableParams(quint64 holder) const override;
     bool animParamValue(quint64 holder, const QString &path, double *value) const override;
@@ -116,7 +116,7 @@ public:
     void recallPreset(int index, double fade) override;
     void recallPreset(int index, double fade, const pxs::core::tree::Preset &overrides) override;
     double presetDuration(quint64 id, double fade, const pxs::core::tree::Preset &overrides) const override;
-    void finishRecalls() override { m_presetPlayback.finish(m_tree); }
+    void finishRecalls() override { m_presetPlayback.finish(m_tree); m_devicePlayback.finish(m_devicePresetTree); }
     const BeatClock &beatClock() const override { return m_beat; }
     bool fadesManual() const override { return true; }
     void stopAll(); // every wait and follow of the sequences stopped, and every timeline
@@ -132,19 +132,20 @@ public:
     void setSaved(); // what it holds now is what is saved
 
     pxs::core::tree::Tree &tree() { return m_tree; }
+    pxs::core::tree::Tree &devicePresetTree() { return m_devicePresetTree; }
     // The top-level nodes that are tabs, in order (the signals are in a drawer of their own, not in a tab)
     const std::vector<std::string> &tabs() const { return m_tabs; }
     // Every node's address in the order it was declared: how the window orders what a node holds (the tree itself is sorted by name)
     const std::vector<std::string> &declared() const { return m_declared; }
 
 private:
-    // What the generator is: every parameter of /generator reads and writes one of these
+    // Each timeline owns its parameters under /timelines
     struct State {
         std::string tab = "timelines";
         std::string shown; // the timeline shown, its slug
     };
 
-    void buildGenerator();
+    void buildTimelines();
     void buildSequence();
     void buildUi();
 
@@ -155,35 +156,36 @@ private:
     pxs::core::tree::Node &signal(const char *path, const char *type, const char *label, const char *description, std::vector<pxs::core::tree::ArgRange> ranges = {},
                                   std::vector<std::string> extendedType = {});
     void action(const char *path, const char *type, const char *label, const char *description, std::function<bool(const pxs::core::ValueList &)> handler);
-    void said(const std::string &path, const pxs::core::ValueList &args); // the last action, on /generator/signals/last_action
+    void said(const std::string &path, const pxs::core::ValueList &args); // the last action, on /timelines/last-action
 
     // What the parameters of a timeline say, to tell the tree which changed
     struct Said {
-        bool play = false;
+        AnimState state = AnimState::Stopped;
         int loop = 0, repeat = 0, passesDone = 0;
-        double duration = 0, speed = 0;
+        double duration = 0, speed = 0, position = 0, played = 0;
         std::string name;
     };
     Timeline *find(quint64 id);
     Said said(const Timeline &t) const;
     void tell(const Timeline &t, const Said &before); // the tree told of what differs from `before`
     int passesDone(const Timeline &t) const;
-    std::string base(const Timeline &t) const { return "/generator/" + t.slug; }
+    std::string base(const Timeline &t) const { return "/timelines/" + t.slug; }
+    std::string claimTimelineName(const QString &name) const;
     void buildTimeline(Timeline &t);  // its nodes
     void buildTracks(Timeline &t);    // its tracks' nodes, made again when they are not as many
-    void buildShown();                // /generator/shown: a choice of the timelines, made again when they change
+    void buildShown();                // /timelines/shown: a choice of the timelines, made again when they change
     void timelinesChanged();
     double filtered(const Timeline &t, size_t index, double raw, double dt);
     void tick();
     void sequenceChanged(); // the nodes of /sequence told, the settings
-    QJsonArray timelinesJson() const;
+    QJsonArray timelinesJson(bool includeTransport = true) const;
     void readTimelines(const QJsonArray &list);
     void readSequence(const QJsonObject &o);
     void load();
     void save();          // soon (the settings are written a moment after the last edit)
     void writeSettings(); // now
 
-    pxs::core::tree::Tree m_tree;
+    pxs::core::tree::Tree m_tree, m_devicePresetTree;
     std::vector<std::string> m_tabs, m_declared;
     State s;
     std::vector<Timeline> m_timelines;
@@ -207,7 +209,7 @@ private:
     }
     void rebuildPresetTargets();
     void readPresets(const QJsonArray &presets);
-    pxs::core::tree::PresetPlayback m_presetPlayback;
+    pxs::core::tree::PresetPlayback m_presetPlayback, m_devicePlayback;
     std::function<void(const QString &)> m_presetRejected;
     std::vector<pxs::core::tree::Preset> m_presets;
     std::vector<std::pair<int, std::function<void()>>> m_presetsListeners;
