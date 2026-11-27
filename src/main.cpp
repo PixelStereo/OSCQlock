@@ -6,6 +6,7 @@
 #include "Destinations.h"
 #include "Device.h"
 #include <pxs/DevicesPanel.h>
+#include <pxs/Discovery.h>
 #include <pxs/OutputsPanel.h>
 #include <QJsonDocument>
 #include <QTabWidget>
@@ -330,8 +331,56 @@ int selfTest()
         && device.timeline(remapped.id)->anim.clock == remapped.clock;
     if (!restored) std::fprintf(stderr, "OSCQlock: timeline preset recall did not restore the track and its filters\n");
 
+    destinations.startDiscovery();
+    auto *discovery = destinations.manager().findChild<pxs::oscquery::Discovery *>();
+    const pxs::oscquery::Device remote{QStringLiteral("OSCQlock lifecycle check"), QStringLiteral("127.0.0.1"),
+                                     QHostAddress::LocalHost, occupiedTcp.serverPort()};
+    bool retained = false;
+    if (discovery) {
+        emit discovery->deviceFound(remote);
+        const auto id = destinations.presetDevice("/devices/oscqlock-lifecycle-check");
+        const auto visible = [&] {
+            const auto devices = destinations.all();
+            return std::any_of(devices.begin(), devices.end(), [id](const auto *entry) { return entry->id == id; });
+        };
+        const auto previous = device.timeline(first)->anim;
+        auto patched = previous;
+        AnimTrack track;
+        track.layer = id;
+        track.param = QStringLiteral("/dimmer");
+        patched.tracks.push_back(track);
+        device.setTimeline(first, patched);
+        emit discovery->deviceLost(remote);
+        retained = id && visible() && !destinations.online(id);
+
+        pxs::core::tree::Preset references;
+        references.id = "1";
+        references.values[destinations.presetPath(id) + "/dimmer"] = "[0.5]";
+        device.setPresets({references});
+        device.setTimeline(first, previous);
+        retained = retained && visible();
+
+        references.values.clear();
+        references.timelines[std::to_string(first)] = QJsonDocument(animationSnapshotToJson(patched)).toJson().toStdString();
+        device.setPresets({references});
+        retained = retained && visible();
+
+        const auto savedShow = dir.filePath(QStringLiteral("offline-device.oscqlock"));
+        Device reopened(nullptr, false);
+        Destinations reopenedDestinations(QStringLiteral("OSCQlock"), 0, false);
+        reopened.setDestinations(&reopenedDestinations);
+        retained = retained && show::save(savedShow, device, destinations, &why)
+            && show::open(savedShow, reopened, reopenedDestinations, &why);
+        const auto reopenedDevices = reopenedDestinations.all();
+        retained = retained && std::any_of(reopenedDevices.begin(), reopenedDevices.end(), [id](const auto *entry) { return entry->id == id; })
+            && !reopenedDestinations.online(id);
+        device.setPresets({});
+        retained = retained && !visible();
+    }
+    if (!retained) std::fprintf(stderr, "OSCQlock: OSCQuery device retention did not follow the timeline and preset references\n");
+
     device.tree().removeObserver(watching);
-    feedback = feedback && transportOk && made && sent && queried && cued && shown && undone && timed && scaled && restored;
+    feedback = feedback && transportOk && made && sent && queried && cued && shown && undone && timed && scaled && restored && retained;
 
     const auto *tab = device.tree().find("/ui/tab");
     const bool named = tab && device.tree().apply("/ui/tab", {Value("timelines")}) == 1

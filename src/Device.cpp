@@ -17,6 +17,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <set>
 
 using namespace pxs::core;
 using namespace pxs::core::tree;
@@ -205,6 +206,7 @@ void Device::buildShown()
 
 void Device::timelinesChanged()
 {
+    updateDeviceReferences();
     buildShown();
     tellTimelines();
     save();
@@ -448,12 +450,37 @@ void Device::setDestinations(Destinations *destinations)
 {
     if (m_destinations) disconnect(m_destinations, nullptr, this, nullptr);
     m_destinations = destinations;
+    updateDeviceReferences();
     rebuildPresetTargets();
     for (Timeline &t : m_timelines) buildTracks(t);
     if (destinations) connect(destinations, &Destinations::changed, this, [this] {
         rebuildPresetTargets();
         m_stale = true;
     }); // a device made, edited: the show too
+}
+
+void Device::updateDeviceReferences()
+{
+    if (!m_destinations) return;
+    std::set<quint64> references;
+    const auto collectTracks = [&references](const Animation &animation) {
+        for (const auto &track : animation.tracks)
+            if (track.layer) references.insert(track.layer);
+    };
+    const auto collectAddress = [this, &references](const std::string &address) {
+        if (const auto id = m_destinations->presetDevice(address)) references.insert(id);
+    };
+    for (const auto &timeline : m_timelines) collectTracks(timeline.anim);
+    for (const auto &preset : m_presets) {
+        collectAddress(preset.scope);
+        for (const auto &entry : preset.values) collectAddress(entry.first);
+        for (const auto &action : preset.actions) collectAddress(action.address);
+        for (const auto &entry : preset.timelines) {
+            const auto snapshot = QJsonDocument::fromJson(QByteArray::fromStdString(entry.second)).object();
+            if (const auto animation = animationSnapshotFromJson(snapshot)) collectTracks(*animation);
+        }
+    }
+    m_destinations->manager().setReferencedDevices(std::move(references));
 }
 
 void Device::rebuildPresetTargets()
@@ -568,6 +595,7 @@ void Device::setTimeline(quint64 id, const Animation &edited, bool restoreTransp
     } else if (rebuild) {
         buildTracks(*t);
     }
+    if (rebuild) updateDeviceReferences();
     tell(*t, before);
     save();
 }
@@ -815,6 +843,7 @@ QJsonObject Device::show() const
 void Device::setPresets(const std::vector<pxs::core::tree::Preset> &presets)
 {
     m_presets = presets;
+    updateDeviceReferences();
     save();
     tellPresets();
 }

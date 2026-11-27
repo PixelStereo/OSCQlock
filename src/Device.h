@@ -175,6 +175,7 @@ private:
     void buildTracks(Timeline &t);    // its tracks' nodes, made again when they are not as many
     void buildShown();                // /timelines/shown: a choice of the timelines, made again when they change
     void timelinesChanged();
+    void updateDeviceReferences();
     double filtered(const Timeline &t, size_t index, double raw, double dt);
     void tick();
     void sequenceChanged(); // the nodes of /sequence told, the settings

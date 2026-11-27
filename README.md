@@ -56,7 +56,8 @@ with the actions `/ui/tab/next` and `/ui/tab/previous`.
 ## Devices: where the tracks send
 
 The **Device Manager** tab shows the devices a track can drive. Device namespaces are kept inside OSCQlock. The **OSCQuery** devices of the network appear by themselves (mDNS):
-their namespace is read, and a track can drive any number of them that can be written (sent over OSC to the port they say). One that is
+their namespace is read, and a track can drive any number of them that can be written (sent over OSC to the port they say). When a discovered
+device leaves the network, it stays visible offline only while a timeline or preset references it. One that is
 not announced is added by its address (**+ OSCQuery…**, `host:port`). A **plain OSC** device is made here (**+ OSC**): a name, a host, a
 UDP port, and the addresses it takes, each with its type (a number `f`, a whole number `i`, on / off `T`/`F`) and its range. In a track,
 the button above its settings chooses what it drives: OSCQlock's own output, or a device and one of its numbers. A value is sent when it
