@@ -200,17 +200,18 @@ private:
 TimelineEditor::TimelineEditor(Device *device, QUndoStack *undo, QWidget *parent)
     : pxs::timelineview::AnimEditor(device, undo, Layout::Side, true, parent), m_device(device)
 {
-    auto *bottom = new QHBoxLayout;
+    auto *controls = timelineControlsLayout();
+    auto *panel = controls->parentWidget();
+    panel->setObjectName(QStringLiteral("timelineControls"));
+    panel->setStyleSheet(QStringLiteral(
+        "QWidget#timelineControls { border: 1px solid #43464e; border-radius: 7px; }"));
+    controls->setContentsMargins(10, 8, 10, 8);
+
     auto *add = new QPushButton(QStringLiteral("+ Track"));
     add->setObjectName(QStringLiteral("accent"));
-    add->setToolTip(QStringLiteral("A track more: a sine on OSCQlock's own output, to point at what it should drive"));
-    bottom->addWidget(add);
-    auto *how = new QLabel(QStringLiteral("Curve lane: click or draw keys · double-click deletes · right-click for the curve and the value.  "
-                                          "Each track: what it drives (OSCQlock, or a device of Devices…), keys or a wave, and its filters."));
-    how->setWordWrap(true);
-    how->setObjectName(QStringLiteral("caption"));
-    bottom->addWidget(how, 1);
-    mainLayout()->addLayout(bottom);
+    add->setAccessibleName(QStringLiteral("Add track"));
+    add->setToolTip(QStringLiteral("Add a track to this timeline"));
+    timelineTransportLayout()->addWidget(add);
     connect(add, &QPushButton::clicked, this, [this] {
         if (!m_has) return;
         AnimTrack t;
@@ -343,6 +344,7 @@ TimelinesPage::TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent) 
     m_tabs->setObjectName(QStringLiteral("timelines"));
     m_tabs->setDocumentMode(true);
     m_tabs->setExpanding(false);
+    m_tabs->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
     m_tabs->setUsesScrollButtons(true);
     m_tabs->setToolTip(QStringLiteral("The timelines (/timelines/shown). Double-click: rename"));
     m_tabs->setDrawBase(false);
@@ -356,15 +358,14 @@ TimelinesPage::TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent) 
         "QToolButton#newTimeline:hover { background: #ff8a3d; color: #17181b; }"
         "QToolButton#closeTimeline { border: none; background: transparent; color: inherit; font-size: 14px; padding: 0 0 1px 4px; }"
         "QToolButton#closeTimeline:hover { color: #ffffff; }"));
-    bar->addWidget(m_tabs, 1);
+    bar->addWidget(m_tabs);
     auto *add = new QToolButton;
     add->setText(QStringLiteral("+"));
     add->setObjectName(QStringLiteral("newTimeline"));
-    add->setToolTip(QStringLiteral("A new timeline (/timelines/new)"));
+    add->setAccessibleName(QStringLiteral("Add timeline"));
+    add->setToolTip(QStringLiteral("Add a timeline"));
     bar->addWidget(add);
-    m_status = new QLabel;
-    m_status->setObjectName(QStringLiteral("caption"));
-    bar->addWidget(m_status);
+    bar->addStretch();
     outer->addLayout(bar);
 
     m_editor = new TimelineEditor(device, undo);
@@ -400,7 +401,7 @@ TimelinesPage::TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent) 
     sync();
 }
 
-// A step of the device: the playhead, ▶ on the sub-tabs of the timelines that play, what was sent
+// Refresh the playhead and the playing indicator on each tab.
 void TimelinesPage::tick()
 {
     m_editor->poll();
@@ -410,7 +411,6 @@ void TimelinesPage::tick()
             const QString text = (t->anim.state == AnimState::Playing ? QStringLiteral("▶  ") : QString()) + t->anim.name;
             if (m_tabs->tabText(i) != text) m_tabs->setTabText(i, text);
         }
-    if (Destinations *d = m_device->destinations()) m_status->setText(QStringLiteral("%1 sent").arg(d->sent()));
 }
 
 TimelinesPage::~TimelinesPage()
