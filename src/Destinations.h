@@ -32,7 +32,6 @@ public:
     bool value(quint64 id, const QString &path, double *v) const { return m_devices.value(id, path, v); }
     const pxs::devices::Address *scaledAddress(quint64 id, const QString &path) const;
     bool send(quint64 id, const QString &path, double v) { return m_devices.send(id, path, v); }
-    int sent() const { return m_devices.sent(); }
 
     QJsonArray showJson() const;
     std::map<quint64, quint64> readShow(const QJsonArray &devices);

@@ -7,7 +7,6 @@
 
 #include <pxs/TimelineEditor.h>
 
-class QLabel;
 class QUndoStack;
 class QTabBar;
 
@@ -49,7 +48,6 @@ private:
     Device *m_device;
     QUndoStack *m_undo;
     QTabBar *m_tabs;
-    QLabel *m_status;
     TimelineEditor *m_editor;
     bool m_syncing = false;
     int m_listener = 0;
