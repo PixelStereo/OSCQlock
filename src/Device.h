@@ -55,7 +55,7 @@ public:
     const Timeline *timeline(quint64 id) const;
     quint64 addTimeline(const QString &name = {}); // with a track of a sine on its own output; its id
     bool removeTimeline(quint64 id);               // the last one stays
-    void restoreTimeline(const Animation &timeline, int index); // one removed, back at its place (undo), with its id
+    void restoreTimeline(const Animation &timeline, const std::string &slug, int index); // one removed, back at its place (undo), with its id
     void renameTimeline(quint64 id, const QString &name);
     quint64 shown() const; // the sub-tab shown (/timelines/shown)
     void show(quint64 id);
@@ -72,7 +72,7 @@ public:
     }
 
     // A timeline as the editor reads it and writes it back (it keeps where it is: its state, its clock)
-    void setTimeline(quint64 id, const Animation &edited, bool restoreTransport = false, bool deferTrackTree = false);
+    void setTimeline(quint64 id, const Animation &edited, bool deferTrackTree = false);
     void control(quint64 id, AnimAction action, double time = 0);
     AnimationPlayback playback(quint64 id) const;
     // Told after each step (the window's playhead)
@@ -116,7 +116,7 @@ public:
     void recallPreset(int index, double fade) override;
     void recallPreset(int index, double fade, const pxs::core::tree::Preset &overrides) override;
     double presetDuration(quint64 id, double fade, const pxs::core::tree::Preset &overrides) const override;
-    void finishRecalls() override { m_presetPlayback.finish(m_tree); m_devicePlayback.finish(m_devicePresetTree); }
+    void finishRecalls() override { m_presetPlayback.finish(m_tree); }
     const BeatClock &beatClock() const override { return m_beat; }
     bool fadesManual() const override { return true; }
     void stopAll(); // every wait and follow of the sequences stopped, and every timeline
@@ -132,7 +132,6 @@ public:
     void setSaved(); // what it holds now is what is saved
 
     pxs::core::tree::Tree &tree() { return m_tree; }
-    pxs::core::tree::Tree &devicePresetTree() { return m_devicePresetTree; }
     // The top-level nodes that are tabs, in order (the signals are in a drawer of their own, not in a tab)
     const std::vector<std::string> &tabs() const { return m_tabs; }
     // Every node's address in the order it was declared: how the window orders what a node holds (the tree itself is sorted by name)
@@ -170,7 +169,7 @@ private:
     void tell(const Timeline &t, const Said &before); // the tree told of what differs from `before`
     int passesDone(const Timeline &t) const;
     std::string base(const Timeline &t) const { return "/timelines/" + t.slug; }
-    std::string claimTimelineName(const QString &name) const;
+    std::string claimTimelineName(const QString &name, bool reservePresetScopes = false) const;
     void buildTimeline(Timeline &t);  // its nodes
     void buildTracks(Timeline &t);    // its tracks' nodes, made again when they are not as many
     void buildShown();                // /timelines/shown: a choice of the timelines, made again when they change
@@ -186,7 +185,7 @@ private:
     void save();          // soon (the settings are written a moment after the last edit)
     void writeSettings(); // now
 
-    pxs::core::tree::Tree m_tree, m_devicePresetTree;
+    pxs::core::tree::Tree m_tree;
     std::vector<std::string> m_tabs, m_declared;
     State s;
     std::vector<Timeline> m_timelines;
@@ -208,9 +207,8 @@ private:
     {
         for (const auto &l : std::vector(m_timelinesListeners)) l.second();
     }
-    void rebuildPresetTargets();
     void readPresets(const QJsonArray &presets);
-    pxs::core::tree::PresetPlayback m_presetPlayback, m_devicePlayback;
+    pxs::core::tree::PresetPlayback m_presetPlayback;
     std::function<void(const QString &)> m_presetRejected;
     std::vector<pxs::core::tree::Preset> m_presets;
     std::vector<std::pair<int, std::function<void()>>> m_presetsListeners;

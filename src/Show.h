@@ -9,7 +9,7 @@ class Device;
 
 namespace show {
 
-inline constexpr int kVersion = 5;
+inline constexpr int kVersion = 6;
 inline QString settingsGroup() { return QStringLiteral("show-v%1").arg(kVersion); }
 inline constexpr const char *kSuffix = "oscqlock";
 bool save(const QString &path, const Device &device, const Destinations &destinations, QString *error);

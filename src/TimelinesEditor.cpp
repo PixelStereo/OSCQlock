@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
 #include <QTabBar>
@@ -42,6 +43,7 @@ public:
         m_filling = true;
         const AnimTrack &t = track();
         m_on->setChecked(t.enabled);
+        m_trackName->setText(t.name);
         Destinations *d = m_tl->device()->destinations();
         const pxs::devices::Device *dest = d && t.layer ? d->find(t.layer) : nullptr;
         QString where = t.layer == 0 ? QStringLiteral("OSCQlock") : dest ? QString::fromStdString(dest->name) : QStringLiteral("(a device not here)");
@@ -65,12 +67,24 @@ protected:
         auto *del = new QPushButton(QStringLiteral("✕"));
         del->setFixedWidth(26);
         del->setToolTip(QStringLiteral("Delete the track"));
+        m_trackName = new QLineEdit;
+        m_trackName->setMaxLength(32);
+        m_trackName->setAccessibleName(QStringLiteral("Track name"));
         g->addWidget(m_on, 0, 0);
-        g->addWidget(m_target, 0, 1, 1, 2);
+        g->addWidget(m_trackName, 0, 1, 1, 2);
         g->addWidget(del, 0, 3);
+        g->addWidget(m_target, 1, 1, 1, 3);
         m_output = new QLabel;
         m_output->setWordWrap(true);
-        g->addWidget(m_output, 1, 1, 1, 3);
+        g->addWidget(m_output, 2, 1, 1, 3);
+        connect(m_trackName, &QLineEdit::editingFinished, this, [this] {
+            const auto name = m_trackName->text().simplified();
+            if (!name.isEmpty() && track().name != name) {
+                track().name = name;
+                changed(false);
+            }
+            m_trackName->setText(track().name);
+        });
         connect(m_on, &QCheckBox::toggled, this, [this](bool on) {
             if (m_filling) return;
             track().enabled = on;
@@ -174,6 +188,7 @@ private:
 
     TimelineEditor *m_tl;
     QCheckBox *m_on = nullptr;
+    QLineEdit *m_trackName = nullptr;
     QLabel *m_output = nullptr;
     QPushButton *m_target = nullptr;
 };
@@ -264,6 +279,12 @@ void TimelineEditor::store(const Animation &before, const Animation &after, cons
 {
     if (m_undo) m_undo->push(new cmd::SetTimeline(m_device, m_id, before, after, text, mergeKey));
     else m_device->setTimeline(m_id, after);
+    const auto *stored = m_device->timeline(m_id);
+    if (!stored || stored->anim.tracks.size() != m_edit.tracks.size()) return;
+    for (size_t i = 0; i < m_edit.tracks.size(); ++i) {
+        m_edit.tracks[i].name = stored->anim.tracks[i].name;
+        m_edit.tracks[i].slug = stored->anim.tracks[i].slug;
+    }
 }
 
 void TimelineEditor::control(AnimAction action, double time)
@@ -273,9 +294,7 @@ void TimelineEditor::control(AnimAction action, double time)
 
 QString TimelineEditor::trackLabel(const AnimTrack &track) const
 {
-    const auto *destinations = m_device->destinations();
-    const auto name = track.layer && destinations ? destinations->nameOf(track.layer) : QStringLiteral("OSCQlock");
-    return QStringLiteral("%1 › %2").arg(name, track.param);
+    return track.name;
 }
 
 TrackRow *TimelineEditor::makeRow(int index) { return new TargetRow(this, index); }
@@ -355,7 +374,7 @@ TimelinesPage::TimelinesPage(Device *device, QUndoStack *undo, QWidget *parent) 
         const quint64 id = m_device->addTimeline();
         const auto &all = m_device->timelines();
         const auto at = std::find_if(all.begin(), all.end(), [id](const Device::Timeline &t) { return t.anim.id == id; });
-        if (at != all.end()) m_undo->push(new cmd::TimelineThere(m_device, at->anim, int(at - all.begin()), true));
+        if (at != all.end()) m_undo->push(new cmd::TimelineThere(m_device, *at, int(at - all.begin()), true));
         m_device->show(id);
     });
     connect(m_tabs, &QTabBar::tabBarClicked, this, [this](int index) {
@@ -426,7 +445,7 @@ void TimelinesPage::sync()
                 const auto &all = m_device->timelines();
                 const auto at = std::find_if(all.begin(), all.end(), [id](const Device::Timeline &t) { return t.anim.id == id; });
                 if (at == all.end() || all.size() <= 1) return;
-                m_undo->push(new cmd::TimelineThere(m_device, at->anim, int(at - all.begin()), false));
+                m_undo->push(new cmd::TimelineThere(m_device, *at, int(at - all.begin()), false));
             });
         });
         close->setVisible(all.size() > 1);

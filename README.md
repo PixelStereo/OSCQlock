@@ -45,7 +45,7 @@ with the actions `/ui/tab/next` and `/ui/tab/previous`.
 | | `/timelines/new`, `new-named`, `remove` | Create a timeline, create one with a given name (`s`), or remove one by its address name (`s`). |
 | | `/timelines/<name>/settings` | Duration in seconds, loop mode, pass count (0 is endless), and speed. |
 | | `/timelines/<name>/transport` | Actions `play`, `pause`, `stop`, `rewind`, and `seek` (seconds in the current pass). Parameters show playback state, position, time played, and completed passes. |
-| | `/timelines/<name>/tracks/<target>` | Track target, enable state, curve points, wave settings, and filters. `output` shows the value after filters. |
+| | `/timelines/<name>/tracks/<track>` | Each track has a short name and a stable address. The branch contains the destination, enable state, curve points, wave settings, and filters. `output` shows the value after filters. |
 | | `/timelines/<name>/signals` | `cycle` and `done` impulses, progress in the current pass, and total seconds played. |
 | **Sequence** | the cue list | NyxMap's sequencer (pxs-qt's `pxs::sequence`), shown by pxs-qt's `pxs::sequenceview`: a step has a text, a **pre-wait** after its GO, what it **does** to a timeline (play, pause, stop, rewind, seek, loop mode, speed), a **post-wait**, and **then**: **GO** (wait for GO), or **AUTO** (a double-click flips it) (the next step gets its GO once this one's action, the time its timeline plays, and its post-wait are over). **GO** (space bar) plays the step on standby (red), **GO BACK** the one before, **Stop** stops the waits, **Stop all** (Escape) the waits and every timeline; a double-click on a step's number plays it |
 | | `/sequence/go`, `back`, `stop`, `stop_all` | actions (`N`), as the buttons |

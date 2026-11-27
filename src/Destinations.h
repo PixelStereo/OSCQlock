@@ -24,9 +24,6 @@ public:
     auto all() const { return m_devices.all(); }
     auto find(quint64 id) const { return m_devices.find(id); }
     QString nameOf(quint64 id) const { return m_devices.nameOf(id); }
-    std::string presetPath(quint64 id) const;
-    quint64 presetDevice(const std::string &address) const;
-    bool isLocalService(const pxs::devices::Device &device) const;
     bool online(quint64 id) const { return m_devices.online(id); }
     quint64 addOscQuery(const QString &host, quint16 port) { return m_devices.addOscQuery(host, port); }
     quint64 addOsc(const QString &name, const QString &host, quint16 port);
@@ -48,9 +45,6 @@ signals:
 
 private:
     void submit();
-    void namePresetTargets();
-    std::map<quint64, std::string> m_presetNames;
-    quint16 m_servicePort;
     pxs::devices::Devices m_devices;
     pxs::dmx::Sender m_sender;
     std::vector<pxs::dmx::Output> m_outputs;

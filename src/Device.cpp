@@ -1,5 +1,4 @@
 #include "Device.h"
-#include <pxs/PresetView.h>
 #include <TimelineTree.h>
 #include "Show.h"
 
@@ -226,10 +225,20 @@ const Device::Timeline *Device::timeline(quint64 id) const
     return nullptr;
 }
 
-std::string Device::claimTimelineName(const QString &name) const
+std::string Device::claimTimelineName(const QString &name, bool reservePresetScopes) const
 {
     std::set<std::string> used{"new", "new-named", "remove", "shown", "last-action"};
     for (const auto &timeline : m_timelines) used.insert(timeline.slug);
+    if (reservePresetScopes) {
+        const std::string prefix = "/timelines/";
+        const auto reserve = [&](const std::string &path) {
+            if (path.rfind(prefix, 0) == 0) used.insert(path.substr(prefix.size(), path.find('/', prefix.size()) - prefix.size()));
+        };
+        for (const auto &preset : m_presets) {
+            reserve(preset.scope);
+            for (const auto &value : preset.values) reserve(value.first);
+        }
+    }
     return pxs::timeline::claimSegment(name.toStdString(), used);
 }
 
@@ -238,26 +247,28 @@ quint64 Device::addTimeline(const QString &name)
     Timeline t;
     t.anim.id = m_nextTimeline++;
     t.anim.name = name.trimmed().isEmpty() ? QStringLiteral("Timeline") : name.trimmed();
-    t.slug = claimTimelineName(t.anim.name);
+    t.slug = claimTimelineName(t.anim.name, true);
     if (name.trimmed().isEmpty() && t.slug != "timeline")
         t.anim.name += QStringLiteral(" ") + QString::fromStdString(t.slug.substr(t.slug.rfind('-') + 1)).toUpper();
     t.anim.duration = 4;
     t.anim.setLoop(AnimLoop::Loop, 0);
     t.anim.tracks = {firstTrack()};
+    pxs::timeline::nameTracks(t.anim);
     m_timelines.push_back(std::move(t));
     buildTimeline(m_timelines.back());
     if (m_tree.find("/timelines/shown")) timelinesChanged();
     return m_timelines.back().anim.id;
 }
 
-void Device::restoreTimeline(const Animation &timeline, int index)
+void Device::restoreTimeline(const Animation &timeline, const std::string &slug, int index)
 {
     if (!timeline.id || this->timeline(timeline.id)) return;
     Timeline t;
     t.anim = timeline;
+    pxs::timeline::nameTracks(t.anim);
     t.anim.state = AnimState::Stopped;
     t.anim.clock = 0;
-    t.slug = claimTimelineName(t.anim.name);
+    t.slug = claimTimelineName(QString::fromStdString(slug));
     m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
     const auto at = m_timelines.begin() + std::clamp(index, 0, int(m_timelines.size()));
     buildTimeline(*m_timelines.insert(at, std::move(t)));
@@ -352,7 +363,7 @@ void Device::buildTimeline(Timeline &tl)
     m_tree.add(b + "/transport").label = "Transport";
     param(b + "/transport/playing", "Playing", CoreParameter::Type::Bool, [](const Timeline &t) { return Value(t.anim.state == AnimState::Playing); },
           [](Timeline &t, const Value &v) { t.anim.control(v.truthy() ? AnimAction::Play : AnimAction::Pause); },
-          [](CoreParameter &p) { p.transient().byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
+          [](CoreParameter &p) { p.transient().presetValue(false).byDefault(Value(false)); }).description = "On: it plays (from where it is). Off: it pauses";
     act(b + "/transport/play", "N", "Play", "Start or resume this timeline", [this, id](const ValueList &) {
         control(id, AnimAction::Play);
         return true;
@@ -364,13 +375,14 @@ void Device::buildTimeline(Timeline &tl)
     param(b + "/transport/state", "State", CoreParameter::Type::Choice,
           [](const Timeline &t) {
               return Value(t.anim.state == AnimState::Playing ? "playing" : t.anim.state == AnimState::Paused ? "paused" : "stopped");
-          }, [](Timeline &, const Value &) {},
-          [](CoreParameter &p) { p.choices({"playing", "paused", "stopped"}).readOnly().transient(); });
+          }, [](Timeline &t, const Value &v) {
+              t.anim.state = v.text() == "playing" ? AnimState::Playing : v.text() == "paused" ? AnimState::Paused : AnimState::Stopped;
+          }, [](CoreParameter &p) { p.choices({"playing", "paused", "stopped"}).transient().presetValue(true); });
     param(b + "/transport/position", "Position", CoreParameter::Type::Float,
           [](const Timeline &t) { return Value(t.anim.position()); },
           [](Timeline &t, const Value &v) {
               t.anim.control(AnimAction::Seek, t.anim.clockAt(std::clamp(v.number().value_or(0.0), 0.0, t.anim.passDuration())));
-          }, [](CoreParameter &p) { p.range(0, 3600).byDefault(Value(0.0)).transient().unit("time.second"); });
+          }, [](CoreParameter &p) { p.range(0, 3600).byDefault(Value(0.0)).transient().presetValue(true).unit("time.second"); });
     param(b + "/transport/played", "Played", CoreParameter::Type::Float,
           [](const Timeline &t) { return Value(t.anim.played()); }, [](Timeline &, const Value &) {},
           [](CoreParameter &p) { p.range(0, 360000).readOnly().transient().unit("time.second"); });
@@ -435,11 +447,7 @@ void Device::buildTracks(Timeline &t)
         if (!timeline || index >= timeline->anim.tracks.size()) return;
         auto edited = timeline->anim;
         edited.tracks[index] = std::move(track);
-        setTimeline(id, edited, false, true);
-    }, [this](const AnimTrack &track) {
-        const auto name = m_destinations && track.layer ? m_destinations->nameOf(track.layer) : QString();
-        const auto target = track.param.isEmpty() ? QStringLiteral("Unassigned") : track.param;
-        return (name.isEmpty() ? target : name + QStringLiteral(" ") + target).toStdString();
+        setTimeline(id, edited, true);
     }, [this, id](size_t index) {
         const auto *timeline = this->timeline(id);
         return timeline && index < timeline->values.size() ? timeline->values[index] : std::numeric_limits<double>::quiet_NaN();
@@ -451,10 +459,8 @@ void Device::setDestinations(Destinations *destinations)
     if (m_destinations) disconnect(m_destinations, nullptr, this, nullptr);
     m_destinations = destinations;
     updateDeviceReferences();
-    rebuildPresetTargets();
     for (Timeline &t : m_timelines) buildTracks(t);
     if (destinations) connect(destinations, &Destinations::changed, this, [this] {
-        rebuildPresetTargets();
         m_stale = true;
     }); // a device made, edited: the show too
 }
@@ -463,58 +469,10 @@ void Device::updateDeviceReferences()
 {
     if (!m_destinations) return;
     std::set<quint64> references;
-    const auto collectTracks = [&references](const Animation &animation) {
-        for (const auto &track : animation.tracks)
+    for (const auto &timeline : m_timelines)
+        for (const auto &track : timeline.anim.tracks)
             if (track.layer) references.insert(track.layer);
-    };
-    const auto collectAddress = [this, &references](const std::string &address) {
-        if (const auto id = m_destinations->presetDevice(address)) references.insert(id);
-    };
-    for (const auto &timeline : m_timelines) collectTracks(timeline.anim);
-    for (const auto &preset : m_presets) {
-        collectAddress(preset.scope);
-        for (const auto &entry : preset.values) collectAddress(entry.first);
-        for (const auto &action : preset.actions) collectAddress(action.address);
-        for (const auto &entry : preset.timelines) {
-            const auto snapshot = QJsonDocument::fromJson(QByteArray::fromStdString(entry.second)).object();
-            if (const auto animation = animationSnapshotFromJson(snapshot)) collectTracks(*animation);
-        }
-    }
     m_destinations->manager().setReferencedDevices(std::move(references));
-}
-
-void Device::rebuildPresetTargets()
-{
-    m_devicePresetTree.remove("/devices");
-    if (!m_destinations) return;
-    for (const auto *destination : m_destinations->all()) {
-        const quint64 id = destination->id;
-        if (m_destinations->isLocalService(*destination)) continue;
-        const auto prefix = m_destinations->presetPath(id);
-        if (prefix.empty()) continue;
-        m_devicePresetTree.add(prefix).label = destination->name;
-        for (const auto &parameter : m_destinations->params(id)) {
-            const QString path = parameter.path;
-            if (!path.startsWith('/')) continue;
-            // Peer apps can publish their own device proxies. Import only their native controls.
-            if (destination->kind == pxs::devices::Kind::OscQuery &&
-                (path == QStringLiteral("/devices") || path.startsWith(QStringLiteral("/devices/")))) continue;
-            auto &node = m_devicePresetTree.add(prefix + path.toStdString());
-            node.type = "d";
-            node.access = 3;
-            node.label = parameter.label.toStdString();
-            node.get = [this, id, path] {
-                double value;
-                if (m_destinations && m_destinations->value(id, path, &value)) return ValueList{Value(value)};
-                return ValueList{};
-            };
-            node.set = [this, id, path](const ValueList &values) {
-                if (!m_destinations || values.size() != 1) return false;
-                const auto value = values.front().number();
-                return value && m_destinations->send(id, path, *value);
-            };
-        }
-    }
 }
 
 // ---- the timelines: the editor's, the transport
@@ -560,7 +518,7 @@ int Device::passesDone(const Timeline &t) const
     return int(std::floor(std::min(t.anim.clock, t.anim.length()) / t.anim.passDuration() + 1e-9));
 }
 
-void Device::setTimeline(quint64 id, const Animation &edited, bool restoreTransport, bool deferTrackTree)
+void Device::setTimeline(quint64 id, const Animation &edited, bool deferTrackTree)
 {
     Timeline *t = find(id);
     if (!t) return;
@@ -568,25 +526,27 @@ void Device::setTimeline(quint64 id, const Animation &edited, bool restoreTransp
     // What it is comes from the editor, where it is stays (as NyxMap keeps a timeline that is edited while it plays)
     Animation next = edited;
     next.id = t->anim.id;
-    if (!restoreTransport) {
-        next.state = t->anim.state;
-        next.clock = t->anim.clock;
-        next.oscillatorOffset = t->anim.oscillatorOffset;
-        next.reversed = t->anim.reversed;
-        next.loop = t->anim.loop;
-        next.repeat = t->anim.repeat;
-        next.setLoop(edited.loop, edited.repeat);
-    } else {
-        const auto prefix = QStringLiteral(":%1:").arg(id);
-        for (auto it = m_filters.begin(); it != m_filters.end();)
-            it = it->first.contains(prefix) ? m_filters.erase(it) : std::next(it);
-    }
+    next.state = t->anim.state;
+    next.clock = t->anim.clock;
+    next.oscillatorOffset = t->anim.oscillatorOffset;
+    next.reversed = t->anim.reversed;
+    next.loop = t->anim.loop;
+    next.repeat = t->anim.repeat;
+    next.setLoop(edited.loop, edited.repeat);
     for (auto &track : next.tracks) {
         for (auto &key : track.keys) key.t = std::clamp(key.t, 0.0, next.duration);
         for (auto &axis : track.axes)
             for (auto &key : axis.keys) key.t = std::clamp(key.t, 0.0, next.duration);
         sortAnimKeys(track);
     }
+    const auto trackPrefix = base(*t) + "/tracks/";
+    std::set<std::string> reserved;
+    if (std::any_of(next.tracks.begin(), next.tracks.end(), [](const auto &track) { return track.slug.empty(); }))
+        for (const auto &preset : m_presets)
+            for (const auto &value : preset.values)
+                if (value.first.rfind(trackPrefix, 0) == 0)
+                    reserved.insert(value.first.substr(trackPrefix.size(), value.first.find('/', trackPrefix.size()) - trackPrefix.size()));
+    pxs::timeline::nameTracks(next, reserved);
     const bool rebuild = !pxs::timeline::sameTrackTree(next, t->anim);
     t->anim = std::move(next);
     if (auto *node = m_tree.find(base(*t))) node->label = t->anim.name.toStdString();
@@ -747,7 +707,6 @@ void Device::sequenceChanged()
 void Device::stopAll()
 {
     m_presetPlayback.clear();
-    m_devicePlayback.clear();
     m_sequencer.stopAll();
     for (Timeline &t : m_timelines)
         if (t.anim.state != AnimState::Stopped) control(t.anim.id, AnimAction::Stop);
@@ -808,6 +767,7 @@ void Device::readTimelines(const QJsonArray &list)
         if (!animation || timeline(animation->id)) continue;
         Timeline t;
         t.anim = *animation;
+        pxs::timeline::nameTracks(t.anim);
         t.slug = claimTimelineName(v.toObject().value("slug").toString());
         m_nextTimeline = std::max(m_nextTimeline, t.anim.id + 1);
         m_timelines.push_back(std::move(t));
@@ -887,36 +847,18 @@ bool Device::applyPreset(int index, double fade, const pxs::core::tree::Preset &
         if (m_presetRejected) m_presetRejected(message);
         qWarning().noquote() << message;
     };
+    if (!isInPresetScope(preset.scope, "/timelines") || !preset.actions.empty()) {
+        reject(preset.scope);
+        return false;
+    }
     for (const auto &[path, value] : preset.values) {
-        const auto &tree = path.rfind("/devices/", 0) == 0 ? m_devicePresetTree : m_tree;
-        const auto *node = tree.find(path);
-        if (!node || node->locked) {
+        const auto *node = m_tree.find(path);
+        if (!isInPresetScope(path, preset.scope) || !node || node->locked || !isPresetParameter(*node)) {
             reject(path);
             return false;
         }
-        if (path.rfind("/devices/", 0) == 0) {
-            const auto device = m_destinations ? m_destinations->presetDevice(path) : 0;
-            if (!m_destinations || !m_destinations->online(device)) {
-                reject(path);
-                return false;
-            }
-        }
     }
-    const auto definitions = pxs::presetview::prepareTimelines(preset, [this](quint64 id) { return timeline(id) != nullptr; });
-    if (!definitions) {
-        reject("timeline");
-        return false;
-    }
-    for (const auto &animation : *definitions) setTimeline(animation.id, animation, true);
-    if (!definitions->empty()) timelinesChanged();
-    auto local = preset, devices = preset;
-    local.values.clear();
-    devices.values.clear();
-    devices.actions.clear();
-    for (const auto &[path, value] : preset.values)
-        (path.rfind("/devices/", 0) == 0 ? devices : local).values.emplace(path, value);
-    m_presetPlayback.start(m_tree, local);
-    m_devicePlayback.start(m_devicePresetTree, devices);
+    m_presetPlayback.start(m_tree, preset);
     return true;
 }
 
@@ -941,7 +883,6 @@ bool Device::loadShow(const QJsonObject &show, QString *error)
     s.shown = show.value("shown").toString().toStdString();
     readSequence(show);
     m_presetPlayback.clear();
-    m_devicePlayback.clear();
     readPresets(show.value("presets").toArray());
     timelinesChanged();
     sequenceChanged();
@@ -1028,7 +969,6 @@ void Device::tick()
     const double dt = m_clock.restart() / 1000.0;
     m_up += dt;
     m_presetPlayback.advance(m_tree, dt);
-    m_devicePlayback.advance(m_devicePresetTree, dt);
     m_sequencer.advance(dt); // its waits, on this thread (fadesManual)
     for (Timeline &t : m_timelines) {
         const std::string b = base(t);

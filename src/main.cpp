@@ -154,7 +154,7 @@ int selfTest()
         QTimer::singleShot(3000, &wait, &QEventLoop::quit);
         wait.exec();
     }
-    const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/timelines/timeline/tracks/receiver-level/output");
+    const bool sent = std::abs(received - 0.4) < 1e-4 && device.tree().find("/timelines/timeline/tracks/level/output");
     if (!sent) std::fprintf(stderr, "OSCQlock: a track did not reach its OSC device through its filter (received %g)\n", received);
 
     // A track that drives an OSCQuery device: OSCQlock itself, added by its address (its namespace read, then written over OSC). A number
@@ -250,7 +250,7 @@ int selfTest()
     // Undo: a timeline removed comes back at its place with its tracks and its nodes; a sequence edited goes back and forth
     QUndoStack history;
     const Animation second = device.timelines()[1].anim;
-    history.push(new cmd::TimelineThere(&device, second, 1, false));
+    history.push(new cmd::TimelineThere(&device, device.timelines()[1], 1, false));
     bool undone = !device.timeline(second.id) && !device.tree().find("/timelines/timeline-a");
     history.undo();
     undone = undone && device.timeline(second.id) && device.timelines()[1].anim.id == second.id &&
@@ -269,10 +269,11 @@ int selfTest()
     if (!undone) std::fprintf(stderr, "OSCQlock: an undo did not put things back\n");
 
     device.stopAll();
-    const auto address = destinations.presetPath(osc) + "/level";
-    const bool writable = device.devicePresetTree().apply(address, {Value(0.2)}) == 1;
-    auto preset = pxs::core::tree::capture(device.devicePresetTree(), {address});
+    const std::string address = "/timelines/timeline/settings/speed";
+    const bool writable = device.tree().apply(address, {Value(0.2)}) == 1;
+    auto preset = pxs::core::tree::capture(device.tree(), {address});
     preset.id = "12345";
+    preset.scope = "/timelines/timeline";
     preset.fade = 1;
     device.setPresets({preset});
     Sequencer::Step recall;
@@ -283,9 +284,9 @@ int selfTest()
     presetSequence.steps = {recall};
     device.sequencer().setSequence(0, presetSequence);
     const auto encoded = Sequencer::stepToJson(recall);
-    const bool timed = address == "/devices/receiver/level" && writable && preset.values.count(address) && encoded.contains("preset_overrides")
+    const bool timed = writable && preset.values.count(address) && encoded.contains("preset_overrides")
         && device.sequencer().goTo(0)
-        && device.devicePresetTree().find(address)->get().front().number() == 0.75;
+        && device.tree().find(address)->get().front().number() == 0.75;
     if (!timed) std::fprintf(stderr, "OSCQlock: preset capture or step override failed\n");
 
     pxs::devices::Device fixture;
@@ -313,23 +314,32 @@ int selfTest()
     const bool scaled = direct && destinations.manager().dmxLevel(fixtureId, "/dimmer") == 255;
     if (!scaled) std::fprintf(stderr, "OSCQlock: raw DMX output or explicit Remap failed\n");
 
-    auto timelinePreset = pxs::core::tree::Preset{};
+    const std::string scope = "/timelines/timeline";
+    device.control(remapped.id, AnimAction::Play);
+    device.control(remapped.id, AnimAction::Seek, 0.375);
+    auto timelinePreset = pxs::core::tree::capture(device.tree(), pxs::core::tree::presetParameters(device.tree(), scope));
     timelinePreset.id = "12346";
-    timelinePreset.scope = "timeline:" + std::to_string(remapped.id);
-    remapped.state = AnimState::Playing;
-    remapped.clock = 0.375;
-    timelinePreset.timelines[std::to_string(remapped.id)] =
-        QJsonDocument(animationSnapshotToJson(remapped)).toJson(QJsonDocument::Compact).toStdString();
+    timelinePreset.scope = scope;
+    const std::string trackPath = scope + "/tracks/dimmer";
+    timelinePreset.removeParameter(trackPath + "/curve/points/point/value");
     device.setPresets({pxs::core::tree::Preset::fromJson(timelinePreset.toJson())});
-    auto stripped = remapped;
-    stripped.tracks.clear();
-    device.setTimeline(stripped.id, stripped);
-    const bool restored = !device.tree().find("/devices") && device.applyPreset(0)
-        && device.timeline(remapped.id)->anim.tracks.size() == 1
+    auto editedTrack = device.timeline(remapped.id)->anim;
+    editedTrack.tracks.front().name = QStringLiteral("House lights");
+    editedTrack.tracks.front().keys.front().v = 0.25;
+    QJsonObject filter = editedTrack.tracks.front().dataFilters.first().toObject();
+    filter["d"] = 200.0;
+    editedTrack.tracks.front().dataFilters[0] = filter;
+    device.setTimeline(remapped.id, editedTrack);
+    device.control(remapped.id, AnimAction::Stop);
+    const bool restored = !device.tree().find("/devices")
+        && !timelinePreset.values.count(trackPath + "/target/address")
+        && device.applyPreset(0)
+        && device.timeline(remapped.id)->anim.tracks.front().name == QStringLiteral("House lights")
+        && device.timeline(remapped.id)->anim.tracks.front().keys.front().v == 0.25
         && device.timeline(remapped.id)->anim.tracks.front().dataFilters == dimmerTrack.dataFilters
         && device.timeline(remapped.id)->anim.state == AnimState::Playing
-        && device.timeline(remapped.id)->anim.clock == remapped.clock;
-    if (!restored) std::fprintf(stderr, "OSCQlock: timeline preset recall did not restore the track and its filters\n");
+        && device.timeline(remapped.id)->anim.clock == 0.375;
+    if (!restored) std::fprintf(stderr, "OSCQlock: scoped timeline preset recall failed\n");
 
     destinations.startDiscovery();
     auto *discovery = destinations.manager().findChild<pxs::oscquery::Discovery *>();
@@ -338,7 +348,9 @@ int selfTest()
     bool retained = false;
     if (discovery) {
         emit discovery->deviceFound(remote);
-        const auto id = destinations.presetDevice("/devices/oscqlock-lifecycle-check");
+        quint64 id = 0;
+        for (const auto *entry : destinations.all())
+            if (entry->name == "OSCQlock lifecycle check") id = entry->id;
         const auto visible = [&] {
             const auto devices = destinations.all();
             return std::any_of(devices.begin(), devices.end(), [id](const auto *entry) { return entry->id == id; });
@@ -353,18 +365,6 @@ int selfTest()
         emit discovery->deviceLost(remote);
         retained = id && visible() && !destinations.online(id);
 
-        pxs::core::tree::Preset references;
-        references.id = "1";
-        references.values[destinations.presetPath(id) + "/dimmer"] = "[0.5]";
-        device.setPresets({references});
-        device.setTimeline(first, previous);
-        retained = retained && visible();
-
-        references.values.clear();
-        references.timelines[std::to_string(first)] = QJsonDocument(animationSnapshotToJson(patched)).toJson().toStdString();
-        device.setPresets({references});
-        retained = retained && visible();
-
         const auto savedShow = dir.filePath(QStringLiteral("offline-device.oscqlock"));
         Device reopened(nullptr, false);
         Destinations reopenedDestinations(QStringLiteral("OSCQlock"), 0, false);
@@ -374,7 +374,7 @@ int selfTest()
         const auto reopenedDevices = reopenedDestinations.all();
         retained = retained && std::any_of(reopenedDevices.begin(), reopenedDevices.end(), [id](const auto *entry) { return entry->id == id; })
             && !reopenedDestinations.online(id);
-        device.setPresets({});
+        device.setTimeline(first, previous);
         retained = retained && !visible();
     }
     if (!retained) std::fprintf(stderr, "OSCQlock: OSCQuery device retention did not follow the timeline and preset references\n");
@@ -523,36 +523,19 @@ int main(int argc, char **argv)
         QObject::connect(sequence, &QObject::destroyed, [&device, sequenceListener] { device.forgetTimelinesListener(sequenceListener); });
 
         struct PresetScopes : pxs::presetview::PresetHost {
-            const Destinations &destinations;
             Device &device;
-            PresetScopes(const Destinations &d, Device &owner) : destinations(d), device(owner) {}
-            std::vector<std::pair<quint64, QString>> timelineScopes() const override
-            {
-                std::vector<std::pair<quint64, QString>> out;
-                for (const auto &timeline : device.timelines()) out.emplace_back(timeline.anim.id, timeline.anim.name);
-                return out;
-            }
-            pxs::core::tree::Tree *deviceParameters() const override { return &device.devicePresetTree(); }
-            std::optional<Animation> readTimeline(quint64 id) const override
-            {
-                if (const auto *timeline = device.timeline(id)) return timeline->anim;
-                return std::nullopt;
-            }
-            void restoreTimeline(const Animation &animation) override { device.setTimeline(animation.id, animation, true); }
+            explicit PresetScopes(Device &owner) : device(owner) {}
             std::vector<std::pair<QString, QString>> scopes() const override
             {
-                std::vector<std::pair<QString, QString>> out{{{}, QStringLiteral("All known parameters")},
-                                                            {QStringLiteral("/devices"), QStringLiteral("All devices")}};
-                for (const auto *device : destinations.all())
-                    if (const auto path = destinations.presetPath(device->id); !path.empty() && !destinations.isLocalService(*device))
-                        out.emplace_back(QString::fromStdString(path), QString::fromStdString(device->name));
+                std::vector<std::pair<QString, QString>> out{{QStringLiteral("/timelines"), QStringLiteral("All timelines")}};
+                for (const auto &timeline : device.timelines())
+                    out.emplace_back(QStringLiteral("/timelines/") + QString::fromStdString(timeline.slug), timeline.anim.name);
                 return out;
             }
         };
-        auto *scopes = new PresetScopes(destinations, device);
+        auto *scopes = new PresetScopes(device);
         auto *presetView = new pxs::presetview::PresetView(device.tree(), undo, scopes);
         QObject::connect(presetView, &QObject::destroyed, [scopes] { delete scopes; });
-        QObject::connect(&destinations, &Destinations::changed, presetView, &pxs::presetview::PresetView::rebuildScopes);
         presetView->setPresets(device.presets());
         presetView->setRecaller([&device](int index) { return device.applyPreset(index); });
         const int scopeListener = device.addTimelinesListener([presetView] { presetView->rebuildScopes(); });

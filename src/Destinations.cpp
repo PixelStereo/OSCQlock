@@ -2,16 +2,13 @@
 #include "Show.h"
 
 #include <QJsonDocument>
-#include <QHostInfo>
-#include <QNetworkInterface>
-#include <set>
 #include <QScopedValueRollback>
 #include <QSettings>
 
 using pxs::devices::Kind;
 
 Destinations::Destinations(const QString &name, quint16 port, bool persistent, QObject *parent)
-    : QObject(parent), m_servicePort(port), m_devices(name, port)
+    : QObject(parent), m_devices(name, port)
 {
     if (persistent) {
         QSettings settings;
@@ -25,7 +22,6 @@ Destinations::Destinations(const QString &name, quint16 port, bool persistent, Q
     }
     connect(&m_devices, &pxs::devices::Devices::changed, this, [this] {
         if (m_loading) return;
-        namePresetTargets();
         emit changed();
     });
     connect(&m_devices, &pxs::devices::Devices::dmxChanged, this, &Destinations::submit);
@@ -34,50 +30,6 @@ Destinations::Destinations(const QString &name, quint16 port, bool persistent, Q
 void Destinations::startDiscovery()
 {
     m_devices.startDiscovery();
-}
-
-void Destinations::namePresetTargets()
-{
-    std::set<std::string> reserved;
-    for (const auto &[id, name] : m_presetNames) reserved.insert(name);
-    for (const auto *device : all()) {
-        if (m_presetNames.count(device->id) || isLocalService(*device)) continue;
-        if (device->kind == Kind::OscQuery && device->manual && !online(device->id)) continue;
-        auto base = pxs::core::device::namespaceSegment(device->name);
-        auto name = base;
-        if (reserved.count(name)) {
-            base += "-";
-            base += pxs::core::device::key(device->kind);
-            name = base;
-        }
-        for (std::string suffix = "a"; !reserved.insert(name).second; suffix += 'a') name = base + "-" + suffix;
-        m_presetNames.emplace(device->id, std::move(name));
-    }
-}
-
-std::string Destinations::presetPath(quint64 id) const
-{
-    const auto it = m_presetNames.find(id);
-    return it == m_presetNames.end() ? std::string{} : "/devices/" + it->second;
-}
-
-quint64 Destinations::presetDevice(const std::string &address) const
-{
-    if (address.rfind("/devices/", 0) != 0) return 0;
-    const auto segment = address.substr(9, address.find('/', 9) - 9);
-    for (const auto &[id, name] : m_presetNames)
-        if (name == segment) return id;
-    return 0;
-}
-
-bool Destinations::isLocalService(const pxs::devices::Device &device) const
-{
-    if (device.kind != Kind::OscQuery || !m_servicePort || device.port != m_servicePort) return false;
-    const auto host = QString::fromStdString(device.host);
-    const QHostAddress address(host);
-    return address.isLoopback() || QNetworkInterface::allAddresses().contains(address)
-        || host.compare(QStringLiteral("localhost"), Qt::CaseInsensitive) == 0
-        || host.compare(QHostInfo::localHostName(), Qt::CaseInsensitive) == 0;
 }
 
 const pxs::devices::Address *Destinations::scaledAddress(quint64 id, const QString &path) const
@@ -118,9 +70,7 @@ QJsonArray Destinations::showJson() const
 {
     QJsonArray outputs;
     for (const auto &output : m_outputs) outputs.append(output.toJson());
-    QJsonObject names;
-    for (const auto &[id, name] : m_presetNames) names[QString::number(id)] = QString::fromStdString(name);
-    return {QJsonObject{{"registry", m_devices.toJson()}, {"dmx_outputs", outputs}, {"preset_names", names}}};
+    return {QJsonObject{{"registry", m_devices.toJson()}, {"dmx_outputs", outputs}}};
 }
 
 std::map<quint64, quint64> Destinations::readShow(const QJsonArray &devices)
@@ -137,19 +87,9 @@ std::map<quint64, quint64> Destinations::readShow(const QJsonArray &devices)
         const auto id = quint64(value.toObject().value("id").toDouble());
         if (id) ids.emplace(id, id);
     }
-    m_presetNames.clear();
-    std::set<std::string> usedNames;
-    const auto names = first.value("preset_names").toObject();
-    for (auto it = names.begin(); it != names.end(); ++it) {
-        const auto id = it.key().toULongLong();
-        const auto value = it.value().toString().toStdString();
-        if (id && !value.empty() && pxs::core::device::namespaceSegment(value) == value && usedNames.insert(value).second)
-            m_presetNames.emplace(id, value);
-    }
     m_outputs.clear();
     for (const auto &value : outputs) m_outputs.push_back(pxs::dmx::Output::fromJson(value.toObject()));
     m_devices.fromJson(registry);
-    namePresetTargets();
     submit();
     emit changed();
     return ids;

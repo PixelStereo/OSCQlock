@@ -15,7 +15,11 @@ public:
         : QUndoCommand(text), m_device(device), m_id(id), m_before(before), m_after(after), m_key(mergeKey)
     {
     }
-    void redo() override { m_device->setTimeline(m_id, m_after); }
+    void redo() override
+    {
+        m_device->setTimeline(m_id, m_after);
+        if (const auto *stored = m_device->timeline(m_id)) m_after = stored->anim;
+    }
     void undo() override { m_device->setTimeline(m_id, m_before); }
     int id() const override { return m_key.isEmpty() ? -1 : 1; }
     bool mergeWith(const QUndoCommand *other) override
@@ -37,8 +41,8 @@ private:
 class TimelineThere : public QUndoCommand
 {
 public:
-    TimelineThere(Device *device, const Animation &timeline, int index, bool made)
-        : QUndoCommand(made ? QStringLiteral("New Timeline") : QStringLiteral("Remove Timeline")), m_device(device), m_timeline(timeline),
+    TimelineThere(Device *device, const Device::Timeline &timeline, int index, bool made)
+        : QUndoCommand(made ? QStringLiteral("New Timeline") : QStringLiteral("Remove Timeline")), m_device(device), m_timeline(timeline.anim), m_slug(timeline.slug),
           m_index(index), m_made(made)
     {
     }
@@ -46,7 +50,7 @@ public:
     void undo() override { m_made ? take() : put(); }
 
 private:
-    void put() { m_device->restoreTimeline(m_timeline, m_index); }
+    void put() { m_device->restoreTimeline(m_timeline, m_slug, m_index); }
     void take()
     {
         if (const Device::Timeline *t = m_device->timeline(m_timeline.id)) m_timeline = t->anim; // as it is now, to put it back so
@@ -54,6 +58,7 @@ private:
     }
     Device *m_device;
     Animation m_timeline;
+    std::string m_slug;
     int m_index;
     bool m_made;
 };
