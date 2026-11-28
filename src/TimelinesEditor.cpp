@@ -1,3 +1,4 @@
+#include <pxs/DeviceTargetMenu.h>
 #include "TimelinesEditor.h"
 
 #include "Commands.h"
@@ -149,26 +150,9 @@ private:
         own->setCheckable(true);
         own->setChecked(t.layer == 0 && t.param == QLatin1String("output"));
         menu->addSeparator();
-        Destinations *d = m_tl->device()->destinations();
-        const auto all = d ? d->all() : std::vector<const pxs::devices::Device *>{};
-        if (all.empty()) menu->addAction(QStringLiteral("No device yet: open Devices… to find or make one"))->setEnabled(false);
-        for (const pxs::devices::Device *dest : all) {
-            const QString kind = QString::fromLatin1(pxs::core::device::name(dest->kind));
-            QMenu *sub = menu->addMenu(QStringLiteral("%1   (%2%3)").arg(QString::fromStdString(dest->name), kind, d->online(dest->id) ? QString() : QStringLiteral(", offline")));
-            const std::vector<ParamInfo> params = d->params(dest->id);
-            if (params.empty()) {
-                sub->addAction(dest->kind == pxs::devices::Kind::Osc ? QStringLiteral("No address: declare them in Devices…")
-                                                                    : QStringLiteral("Nothing to drive (its namespace is not read yet)"))
-                    ->setEnabled(false);
-                continue;
-            }
-            const quint64 id = dest->id;
-            pxs::timelineview::addParamMenu(sub, params, [&](QMenu *into, const ParamInfo &p, const QString &text) {
-                QAction *a = into->addAction(text, this, [this, id, path = p.path] { select(id, path); });
-                a->setCheckable(true);
-                a->setChecked(t.layer == id && t.param == p.path);
-            });
-        }
+        if (const auto *destinations = m_tl->device()->destinations())
+            pxs::devices::addDeviceTargets(menu->addMenu(QStringLiteral("Devices")), destinations->manager(), this,
+                [this](quint64 id, const ParamInfo &p) { select(id, p.path); }, t.layer, t.param);
     }
 
     void select(quint64 holder, const QString &path)
